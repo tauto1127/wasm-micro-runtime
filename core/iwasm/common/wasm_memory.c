@@ -196,6 +196,7 @@ wasm_runtime_malloc_internal(unsigned int size)
         return mem_allocator_malloc(pool_allocator, size);
     }
     else if (memory_mode == MEMORY_MODE_ALLOCATOR) {
+        /// 全部ゼロ
         return malloc_func(
 #if WASM_MEM_ALLOC_WITH_USAGE != 0
             Alloc_For_Runtime,

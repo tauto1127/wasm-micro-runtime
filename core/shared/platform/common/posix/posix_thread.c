@@ -159,6 +159,7 @@ os_mutex_lock(korp_mutex *mutex)
 }
 
 int
+// posixだとpthread_mutex_t
 os_mutex_unlock(korp_mutex *mutex)
 {
     int ret;

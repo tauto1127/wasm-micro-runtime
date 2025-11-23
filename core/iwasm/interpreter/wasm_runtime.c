@@ -173,6 +173,9 @@ memory_instantiate(WASMModuleInstance *module_inst, WASMModuleInstance *parent,
 #if WASM_ENABLE_SHARED_MEMORY != 0
     is_shared_memory = flags & SHARED_MEMORY_FLAG ? true : false;
 
+    // memory_idxは常にゼロ
+    printf("memory_idx: %d is shared memory: %d\n", memory_idx, is_shared_memory);
+
     /* shared memory */
     if (is_shared_memory && parent != NULL) {
         bh_assert(parent->memory_count > memory_idx);
@@ -405,6 +408,7 @@ memories_instantiate(const WASMModule *module, WASMModuleInstance *module_inst,
         uint32 flags = import->u.memory.mem_type.flags;
         uint32 actual_heap_size = heap_size;
 
+        printf("WASM_ENABLE_MULTI_MODULE: %d\n", WASM_ENABLE_MULTI_MODULE);
 #if WASM_ENABLE_MULTI_MODULE != 0
         if (import->u.memory.import_module != NULL) {
             WASMModuleInstance *module_inst_linked;
@@ -426,6 +430,7 @@ memories_instantiate(const WASMModule *module, WASMModuleInstance *module_inst,
         else
 #endif
         {
+            printf("memories_instantiate，L433");
             if (!(memories[mem_index] = memory_instantiate(
                       module_inst, parent, memory, mem_index,
                       num_bytes_per_page, init_page_count, max_page_count,
@@ -437,8 +442,11 @@ memories_instantiate(const WASMModule *module, WASMModuleInstance *module_inst,
         }
     }
 
+    printf("実行されたL445\n");
+    printf("memory_count: %d import_memory_count: %d\n", module->memory_count, module->import_memory_count);
     /* instantiate memories from memory section */
     for (i = 0; i < module->memory_count; i++, memory++) {
+        printf("わああああああ");
         uint32 max_page_count = wasm_runtime_get_max_mem(
             max_memory_pages, module->memories[i].init_page_count,
             module->memories[i].max_page_count);

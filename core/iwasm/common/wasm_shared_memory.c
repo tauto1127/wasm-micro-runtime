@@ -96,10 +96,12 @@ shared_memory_dec_reference(WASMMemoryInstance *memory)
 {
     bh_assert(shared_memory_is_shared(memory));
     uint16 old;
+    // 普通のマシンなら1
 #if BH_ATOMIC_16_IS_ATOMIC == 0
     os_mutex_lock(&g_shared_memory_lock);
 #endif
     old = BH_ATOMIC_16_FETCH_SUB(memory->ref_count, 1);
+    // 普通のマシンなら1
 #if BH_ATOMIC_16_IS_ATOMIC == 0
     os_mutex_unlock(&g_shared_memory_lock);
 #endif
