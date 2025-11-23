@@ -211,6 +211,9 @@ void
 wasm_cluster_thread_exited(WASMExecEnv *exec_env);
 
 void
+wasm_cluster_thread_continue_all(WASMCluster *cluster);
+
+void
 wasm_cluster_thread_continue(WASMExecEnv *exec_env);
 
 void

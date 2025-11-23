@@ -386,7 +386,7 @@ struct WASMModuleInstance {
 
     /* import func ptrs + llvm jit func ptrs */
     DefPointer(void **, func_ptrs);
-
+    
     /* function type indexes */
     DefPointer(uint32 *, func_type_indexes);
 

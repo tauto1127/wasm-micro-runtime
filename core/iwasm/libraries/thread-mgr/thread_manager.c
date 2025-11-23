@@ -914,6 +914,18 @@ wasm_cluster_send_signal_all(WASMCluster *cluster, uint32 signo)
         wasm_cluster_thread_send_signal(exec_env, signo);
         exec_env = bh_list_elem_next(exec_env);
     }
+    printf("スレッドの総数:%d", bh_list_length(&cluster->exec_env_list));
+    
+
+    uint32 total = 0;
+    os_mutex_lock(&cluster->lock);
+    WASMExecEnv *env = bh_list_first_elem(&cluster->exec_env_list);
+    while (env) {
+        total += env->wait_count; /* この exec_env を join して待っている数 */
+        env = bh_list_elem_next(env);
+    }
+    os_mutex_unlock(&cluster->lock);
+    printf("waitしてるスレッドの総数:%d", total);
 }
 
 void
@@ -921,6 +933,14 @@ wasm_cluster_thread_exited(WASMExecEnv *exec_env)
 {
     exec_env->current_status->running_status = STATUS_EXIT;
     notify_debug_instance_exit(exec_env);
+}
+
+void wasm_cluster_thread_continue_all(WASMCluster *cluster) {
+    WASMExecEnv *exec_env = bh_list_first_elem(&cluster->exec_env_list);
+    while(exec_env) {
+        wasm_cluster_thread_continue(exec_env);
+        exec_env = bh_list_elem_next(exec_env);
+    }
 }
 
 void

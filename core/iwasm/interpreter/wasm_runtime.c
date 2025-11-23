@@ -172,7 +172,7 @@ memory_instantiate(WASMModuleInstance *module_inst, WASMModuleInstance *parent,
     bool is_shared_memory = false;
 #if WASM_ENABLE_SHARED_MEMORY != 0
     is_shared_memory = flags & SHARED_MEMORY_FLAG ? true : false;
-
+    
     // memory_idxは常にゼロ
     printf("memory_idx: %d is shared memory: %d\n", memory_idx, is_shared_memory);
 

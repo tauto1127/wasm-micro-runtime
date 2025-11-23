@@ -52,7 +52,7 @@ thread_start(void *arg)
     wasm_exec_env_t exec_env = (wasm_exec_env_t)arg;
     ThreadStartArg *thread_arg = exec_env->thread_arg;
     uint32 argv[2];
-
+    
     wasm_exec_env_set_thread_info(exec_env);
     argv[0] = thread_arg->thread_id;
     argv[1] = thread_arg->arg;

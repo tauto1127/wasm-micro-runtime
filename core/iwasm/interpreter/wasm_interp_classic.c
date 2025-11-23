@@ -1352,10 +1352,12 @@ wasm_interp_call_func_import(WASMModuleInstance *module_inst,
     do {                                                               \
         os_mutex_lock(&exec_env->wait_lock);                           \
         if (IS_WAMR_TERM_SIG(exec_env->current_status->signal_flag)) { \
+            printf("CHECK_SUSPEND_FLAGS called 上 %ln\n", &exec_env->handle);                          \
             os_mutex_unlock(&exec_env->wait_lock);                     \
             return;                                                    \
         }                                                              \
         if (IS_WAMR_STOP_SIG(exec_env->current_status->signal_flag)) { \
+            printf("CHECK_SUSPEND_FLAGS called 上 %ln\n", &exec_env->handle);                          \
             SYNC_ALL_TO_FRAME();                                       \
             wasm_cluster_thread_waiting_run(exec_env);                 \
         }                                                              \
@@ -1374,6 +1376,7 @@ wasm_interp_call_func_import(WASMModuleInstance *module_inst,
 
 #define CHECK_SUSPEND_FLAGS()                                         \
     do {                                                              \
+        printf("CHECK_SUSPEND_FLAGS called 下 %ln\n", &exec_env->handle);                          \
         WASM_SUSPEND_FLAGS_LOCK(exec_env->wait_lock);                 \
         if (WASM_SUSPEND_FLAGS_GET(exec_env->suspend_flags)           \
             & WASM_SUSPEND_FLAG_TERMINATE) {                          \
@@ -1450,12 +1453,31 @@ get_global_addr(uint8 *global_data, WASMGlobalInstance *global)
 #endif
 }
 
+
+WASMCluster* _cluster;
+void sigusr2(int s) {
+    printf("suspend\n");
+    // wasm_cluster_suspend_all(_cluster);
+    wasm_cluster_send_signal_all(_cluster, WAMR_SIG_STOP);
+    return;
+}
+void sigusr1(int s) {
+    printf("復活\n");
+    // wasm_cluster_suspend_all(_cluster);
+    // wasm_cluster_send_signal_all(_cluster, WAMR_SIG_STOP);
+    wasm_cluster_thread_continue_all(_cluster);
+    return;
+}
 static void
 wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                                WASMExecEnv *exec_env,
                                WASMFunctionInstance *cur_func,
                                WASMInterpFrame *prev_frame)
 {
+    signal(SIGUSR2, &sigusr2);
+    signal(SIGUSR1, &sigusr1);
+    _cluster = exec_env->cluster;
+    printf("signalハンドラの設定");
     WASMMemoryInstance *memory = wasm_get_default_memory(module);
 #if !defined(OS_ENABLE_HW_BOUND_CHECK)              \
     || WASM_CPU_SUPPORTS_UNALIGNED_ADDR_ACCESS == 0 \
@@ -1549,10 +1571,14 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
 
 #if WASM_ENABLE_LABELS_AS_VALUES == 0
     while (frame_ip < frame_ip_end) {
+        
         opcode = *frame_ip++;
         switch (opcode) {
 #else
     FETCH_OPCODE_AND_DISPATCH();
+#endif
+#if WASM_ENABLE_THREAD_MGR != 0
+                CHECK_SUSPEND_FLAGS();
 #endif
             /* control instructions */
             HANDLE_OP(WASM_OP_UNREACHABLE)
