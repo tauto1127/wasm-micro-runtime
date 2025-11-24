@@ -1415,6 +1415,7 @@ wasm_interp_call_func_import(WASMModuleInstance *module_inst,
             wasm_cluster_thread_waiting_run(exec_env);                    \
         }                                                                 \
         os_mutex_unlock(&exec_env->wait_lock);                            \
+        printf("test");
         goto *handle_table[*frame_ip++];                                  \
     } while (0)
 #else
@@ -1568,6 +1569,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
     DEFINE_GOTO_TABLE(const void *, handle_table);
 #undef HANDLE_OPCODE
 #endif
+    // WASM_ENABLE_LABELS_AS_VALUES: 1
 
 #if WASM_ENABLE_LABELS_AS_VALUES == 0
     while (frame_ip < frame_ip_end) {
