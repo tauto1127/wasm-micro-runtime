@@ -27,6 +27,8 @@
 #if WASM_ENABLE_FAST_JIT != 0
 #include "../fast-jit/jit_compiler.h"
 #endif
+#include <pthread.h>
+#include <signal.h>
 
 typedef int32 CellType_I32;
 typedef int64 CellType_I64;
@@ -1457,31 +1459,68 @@ get_global_addr(uint8 *global_data, WASMGlobalInstance *global)
 #endif
 }
 
+#if WASM_ENABLE_THREAD_MGR != 0 && WASM_ENABLE_DEBUG_INTERP != 0
+static korp_tid signal_control_tid;
+static bool signal_control_started;
 
-WASMCluster* _cluster;
-void sigusr2(int s) {
-    printf("suspend\n");
-    // wasm_cluster_suspend_all(_cluster);
-    wasm_cluster_send_signal_all(_cluster, WAMR_SIG_STOP);
-    return;
+static void *
+signal_control_routine(void *arg)
+{
+    WASMCluster *cluster = (WASMCluster *)arg;
+    sigset_t set;
+    int sig;
+
+    sigemptyset(&set);
+    sigaddset(&set, SIGUSR1);
+    sigaddset(&set, SIGUSR2);
+
+    /* Loop forever waiting for SIGUSR1/2 and coordinate stop/resume */
+    while (true) {
+        if (sigwait(&set, &sig) != 0) {
+            continue;
+        }
+        if (sig == SIGUSR2) {
+            wasm_cluster_send_signal_all(cluster, WAMR_SIG_STOP);
+        }
+        else if (sig == SIGUSR1) {
+            wasm_cluster_thread_continue_all(cluster);
+        }
+    }
+
+    return NULL;
 }
-void sigusr1(int s) {
-    printf("復活\n");
-    // wasm_cluster_suspend_all(_cluster);
-    // wasm_cluster_send_signal_all(_cluster, WAMR_SIG_STOP);
-    wasm_cluster_thread_continue_all(_cluster);
-    return;
+
+static void
+maybe_start_signal_control_thread(WASMCluster *cluster)
+{
+    sigset_t set;
+
+    if (signal_control_started) {
+        return;
+    }
+
+    /* Block signals in this thread; handler thread will consume via sigwait */
+    sigemptyset(&set);
+    sigaddset(&set, SIGUSR1);
+    sigaddset(&set, SIGUSR2);
+    pthread_sigmask(SIG_BLOCK, &set, NULL);
+
+    if (os_thread_create(&signal_control_tid, signal_control_routine, cluster,
+                         APP_THREAD_STACK_SIZE_DEFAULT)
+        == 0) {
+        signal_control_started = true;
+    }
 }
+#else
+#define maybe_start_signal_control_thread(cluster) (void)(cluster)
+#endif
 static void
 wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                                WASMExecEnv *exec_env,
                                WASMFunctionInstance *cur_func,
                                WASMInterpFrame *prev_frame)
 {
-    signal(SIGUSR2, &sigusr2);
-    signal(SIGUSR1, &sigusr1);
-    _cluster = exec_env->cluster;
-    printf("signalハンドラの設定");
+    maybe_start_signal_control_thread(exec_env->cluster);
     WASMMemoryInstance *memory = wasm_get_default_memory(module);
 #if !defined(OS_ENABLE_HW_BOUND_CHECK)              \
     || WASM_CPU_SUPPORTS_UNALIGNED_ADDR_ACCESS == 0 \

@@ -52,6 +52,11 @@ wait_address_equal(void *h1, void *h2);
 static void
 destroy_wait_info(void *wait_info);
 
+#if WASM_ENABLE_THREAD_MGR != 0
+static void
+wait_count_cb(void *key, void *value, void *user_data);
+#endif
+
 bool
 wasm_shared_memory_init()
 {
@@ -436,3 +441,35 @@ wasm_runtime_atomic_notify(WASMModuleInstanceCommon *module, void *address,
 
     return notify_result;
 }
+
+#if WASM_ENABLE_THREAD_MGR != 0
+
+static void
+wait_count_cb(void *key, void *value, void *user_data)
+{
+    (void)key;
+    AtomicWaitInfo *info = (AtomicWaitInfo *)value;
+    uint32 *total = (uint32 *)user_data;
+    AtomicWaitNode *node = bh_list_first_elem(info->wait_list);
+
+    while (node) {
+        (*total)++;
+        node = bh_list_elem_next(node);
+    }
+}
+
+uint32
+wasm_shared_memory_get_waiters_count(void)
+{
+    uint32 total = 0;
+
+    os_mutex_lock(&g_shared_memory_lock);
+    if (wait_map) {
+        bh_hash_map_traverse(wait_map, wait_count_cb, &total);
+    }
+    os_mutex_unlock(&g_shared_memory_lock);
+
+    return total;
+}
+
+#endif /* WASM_ENABLE_THREAD_MGR != 0 */

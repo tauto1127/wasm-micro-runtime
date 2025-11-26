@@ -12,6 +12,9 @@
 #if WASM_ENABLE_AOT != 0
 #include "../aot/aot_runtime.h"
 #endif
+#if WASM_ENABLE_THREAD_MGR != 0 && WASM_ENABLE_SHARED_MEMORY != 0
+#include "../common/wasm_shared_memory.h"
+#endif
 
 #if WASM_ENABLE_DEBUG_INTERP != 0
 #include "debug_engine.h"
@@ -924,6 +927,11 @@ wasm_cluster_send_signal_all(WASMCluster *cluster, uint32 signo)
 
     uint32 total = 0;
     uint32 blocking_total = 0;
+#if WASM_ENABLE_SHARED_MEMORY != 0 && WASM_ENABLE_THREAD_MGR != 0
+    uint32 atomic_wait_total = wasm_shared_memory_get_waiters_count();
+#else
+    uint32 atomic_wait_total = 0;
+#endif
     os_mutex_lock(&cluster->lock);
     WASMExecEnv *env = bh_list_first_elem(&cluster->exec_env_list);
     while (env) {
@@ -941,6 +949,7 @@ wasm_cluster_send_signal_all(WASMCluster *cluster, uint32 signo)
 
     printf("waitしてるスレッドの総数:%d", total);
     printf("blockingしてるスレッドの総数:%d", blocking_total);
+    printf("atomic waitしてるスレッドの総数:%d", atomic_wait_total);
     printf("スレッドの総数:%d", bh_list_length(&cluster->exec_env_list));
 
     WASMExecEnv *exec_env = bh_list_first_elem(&cluster->exec_env_list);

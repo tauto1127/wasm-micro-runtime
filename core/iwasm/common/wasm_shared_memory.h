@@ -56,6 +56,11 @@ uint32
 wasm_runtime_atomic_notify(WASMModuleInstanceCommon *module, void *address,
                            uint32 count);
 
+#if WASM_ENABLE_THREAD_MGR != 0
+uint32
+wasm_shared_memory_get_waiters_count(void);
+#endif
+
 #ifdef __cplusplus
 }
 #endif
