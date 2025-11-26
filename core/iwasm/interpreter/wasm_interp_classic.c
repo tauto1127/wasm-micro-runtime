@@ -1352,12 +1352,13 @@ wasm_interp_call_func_import(WASMModuleInstance *module_inst,
     do {                                                               \
         os_mutex_lock(&exec_env->wait_lock);                           \
         if (IS_WAMR_TERM_SIG(exec_env->current_status->signal_flag)) { \
-            printf("CHECK_SUSPEND_FLAGS called 上 %ln\n", &exec_env->handle);                          \
+            printf("CHECK_SUSPEND_FLAGS called 上1355 %ln\n", &exec_env->handle);                          \
             os_mutex_unlock(&exec_env->wait_lock);                     \
             return;                                                    \
         }                                                              \
         if (IS_WAMR_STOP_SIG(exec_env->current_status->signal_flag)) { \
-            printf("CHECK_SUSPEND_FLAGS called 上 %ln\n", &exec_env->handle);                          \
+            printf("CHECK_SUSPEND_FLAGS called 上1360 %ln\n", &exec_env->handle);                          \
+            printf("thread: %ld\n", pthread_self());\
             SYNC_ALL_TO_FRAME();                                       \
             wasm_cluster_thread_waiting_run(exec_env);                 \
         }                                                              \
@@ -1399,7 +1400,10 @@ wasm_interp_call_func_import(WASMModuleInstance *module_inst,
 #if WASM_ENABLE_LABELS_AS_VALUES != 0
 
 #define HANDLE_OP(opcode) HANDLE_##opcode:
-#define FETCH_OPCODE_AND_DISPATCH() goto *handle_table[*frame_ip++]
+#define FETCH_OPCODE_AND_DISPATCH() do { \
+    HANDLE_OP_END(); \
+    goto *handle_table[*frame_ip++]; \
+}while(0)\
 
 #if WASM_ENABLE_THREAD_MGR != 0 && WASM_ENABLE_DEBUG_INTERP != 0
 #define HANDLE_OP_END()                                                   \
@@ -1415,7 +1419,6 @@ wasm_interp_call_func_import(WASMModuleInstance *module_inst,
             wasm_cluster_thread_waiting_run(exec_env);                    \
         }                                                                 \
         os_mutex_unlock(&exec_env->wait_lock);                            \
-        printf("test");
         goto *handle_table[*frame_ip++];                                  \
     } while (0)
 #else
