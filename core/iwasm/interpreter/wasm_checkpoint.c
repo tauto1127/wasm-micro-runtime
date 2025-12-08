@@ -65,6 +65,7 @@ signal_control_routine(void *arg)
             printf("end checkpoint\n");
         }
         else if (sig == SIGUSR1) {
+            printf("SIGUSR1 called");
             wasm_cluster_thread_continue_all(cluster);
         }
     }

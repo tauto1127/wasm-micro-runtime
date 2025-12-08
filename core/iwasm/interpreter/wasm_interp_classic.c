@@ -1357,7 +1357,6 @@ wasm_interp_call_func_import(WASMModuleInstance *module_inst,
     do {                                                               \
         os_mutex_lock(&exec_env->wait_lock);                           \
         if (IS_WAMR_CHECKPOINT_SIG(exec_env->current_status->signal_flag)) {\
-            printf("CHECK_SUSPEND_FLAGS WAMR_CHECKPOINT_SIG\n");                          \
             SYNC_ALL_TO_FRAME();                                           \
             wasm_cluster_decrease_checkpointing_counter(exec_env->cluster); \
             wasm_cluster_thread_waiting_run(exec_env);                 \

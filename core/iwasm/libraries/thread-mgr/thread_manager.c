@@ -929,7 +929,6 @@ wasm_cluster_init_checkpointing_counter(WASMCluster *cluster, int count) {
 }
 
 void wasm_cluster_decrease_checkpointing_counter(WASMCluster *cluster) {
-    printf("descrise\n");
     os_mutex_lock(&cluster->lock);
     struct AtomicCounter* counter = cluster->checkpointing_counter;
 
@@ -938,6 +937,23 @@ void wasm_cluster_decrease_checkpointing_counter(WASMCluster *cluster) {
     os_cond_signal(&counter->cond);
     os_mutex_unlock(&counter->lock);
 
+    os_mutex_unlock(&cluster->lock);
+}
+
+void wasm_cluster_increase_checkpointing_counter(WASMCluster *cluster) {
+    os_mutex_lock(&cluster->lock);
+    struct AtomicCounter* counter = cluster->checkpointing_counter;
+
+    os_mutex_lock(&counter->lock);
+    counter->checkpointing_count++;
+    os_mutex_unlock(&counter->lock);
+
+    os_mutex_unlock(&cluster->lock);
+}
+
+void wasm_cluster_reset_checkpointing_counter(WASMCluster *cluster) {
+    os_mutex_lock(&cluster->lock);
+    cluster->checkpointing_counter = NULL;
     os_mutex_unlock(&cluster->lock);
 }
 
@@ -952,7 +968,6 @@ int wasm_cluster_get_thread_count(WASMCluster *cluster) {
     os_mutex_unlock(&cluster->lock);
     return count;
 }
-
 
 int wasm_cluster_get_waiting_thread_count(WASMCluster *cluster) {
     // int count = bh_list_length(get_wait_map());

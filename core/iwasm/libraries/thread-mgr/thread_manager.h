@@ -221,6 +221,8 @@ struct AtomicCounter*
 wasm_cluster_init_checkpointing_counter(WASMCluster *cluster, int count);
 
 void wasm_cluster_decrease_checkpointing_counter(WASMCluster *cluster);
+void wasm_cluster_increase_checkpointing_counter(WASMCluster *cluster);
+void wasm_cluster_reset_checkpointing_counter(WASMCluster *cluster);
 
 int
 wasm_cluster_get_waiting_thread_count(WASMCluster *cluster);
