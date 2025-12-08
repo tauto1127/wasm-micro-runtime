@@ -9,6 +9,14 @@
 #include "platform_api_vmcore.h"
 #include "platform_common.h"
 #include "wasm_exec_env.h"
+#include <signal.h>
+#include <string.h>
+
+static void
+noop_usr_handler(int signo)
+{
+    (void)signo;
+}
 
 #if WASM_ENABLE_INTERP != 0
 #include "../interpreter/wasm_runtime.h"
@@ -54,6 +62,24 @@ wasm_cluster_set_max_thread_num(uint32 num)
 bool
 thread_manager_init()
 {
+    /* Block SIGUSR1/SIGUSR2 in the main thread so newly spawned threads
+     * inherit the mask; a dedicated sigwait thread will consume them. */
+    sigset_t set;
+    sigemptyset(&set);
+    sigaddset(&set, SIGUSR1);
+    sigaddset(&set, SIGUSR2);
+    pthread_sigmask(SIG_BLOCK, &set, NULL);
+
+    /* Install no-op handlers to avoid default terminate if a thread
+     * temporarily unmasks these signals. Blocked signals still work with
+     * sigwait. */
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = noop_usr_handler;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGUSR1, &sa, NULL);
+    sigaction(SIGUSR2, &sa, NULL);
+
     if (bh_list_init(cluster_list) != 0)
         return false;
     if (os_mutex_init(&cluster_list_lock) != 0)
@@ -941,14 +967,17 @@ void wasm_cluster_decrease_checkpointing_counter(WASMCluster *cluster) {
 }
 
 void wasm_cluster_increase_checkpointing_counter(WASMCluster *cluster) {
+    printf("wasm_cluster_increase_checkpointing_counter\n");
     os_mutex_lock(&cluster->lock);
     struct AtomicCounter* counter = cluster->checkpointing_counter;
+    os_mutex_unlock(&cluster->lock);
 
     os_mutex_lock(&counter->lock);
+    printf("wasm_cluster_increase_checkpointing_counter2\n");
     counter->checkpointing_count++;
+    os_cond_signal(&counter->cond);
     os_mutex_unlock(&counter->lock);
 
-    os_mutex_unlock(&cluster->lock);
 }
 
 void wasm_cluster_reset_checkpointing_counter(WASMCluster *cluster) {
@@ -970,8 +999,6 @@ int wasm_cluster_get_thread_count(WASMCluster *cluster) {
 }
 
 int wasm_cluster_get_waiting_thread_count(WASMCluster *cluster) {
-    // int count = bh_list_length(get_wait_map());
-    //#TODO ここでwait_mapを取得
     return get_wait_node_count();
 }
 

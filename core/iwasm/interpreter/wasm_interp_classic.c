@@ -1355,13 +1355,14 @@ wasm_interp_call_func_import(WASMModuleInstance *module_inst,
 #if WASM_ENABLE_DEBUG_INTERP != 0
 #define CHECK_SUSPEND_FLAGS()                                          \
     do {                                                               \
-        os_mutex_lock(&exec_env->wait_lock);                           \
+    printf("CHECK_SUSPEND_FLAGS\n");\
+    os_mutex_lock(&exec_env->wait_lock);                           \
         if (IS_WAMR_CHECKPOINT_SIG(exec_env->current_status->signal_flag)) {\
+            printf("CHECKPOINT_SIG\n");\
             SYNC_ALL_TO_FRAME();                                           \
-            wasm_cluster_decrease_checkpointing_counter(exec_env->cluster); \
+            wasm_cluster_increase_checkpointing_counter(exec_env->cluster); \
             wasm_cluster_thread_waiting_run(exec_env);                 \
             os_mutex_unlock(&exec_env->wait_lock);\
-            return;                                                    \
         }\
         if (IS_WAMR_TERM_SIG(exec_env->current_status->signal_flag)) { \
             printf("CHECK_SUSPEND_FLAGS WAMR_TERM_SIG\n");                          \
@@ -1534,6 +1535,7 @@ maybe_start_signal_control_thread(WASMCluster *cluster)
     if (os_thread_create(&signal_control_tid, signal_control_routine, cluster,
                          APP_THREAD_STACK_SIZE_DEFAULT)
         == 0) {
+        printf("signal init: %lu\n", signal_control_tid);
         signal_control_started = true;
     }
 }

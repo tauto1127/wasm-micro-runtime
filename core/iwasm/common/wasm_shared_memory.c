@@ -173,10 +173,6 @@ notify_wait_list(bh_list *wait_list, uint32 count)
         next = bh_list_elem_next(node);
 
         node->status = S_NOTIFIED;
-        if(node->exec_env->cluster->checkpointing_counter != NULL) {
-            printf("call notify during checkpoint");
-            wasm_cluster_increase_checkpointing_counter(node->exec_env->cluster);
-        }
         /* wakeup */
         os_cond_signal(&node->wait_cond);
 
@@ -353,10 +349,6 @@ wasm_runtime_atomic_wait(WASMModuleInstanceCommon *module, void *address,
 
     while (1) {
         if (timeout < 0) {
-            if(exec_env->cluster->checkpointing_counter != NULL) {
-                printf("call wait during checkpoint");
-                wasm_cluster_decrease_checkpointing_counter(exec_env->cluster);
-            }
             /* wait forever until it is notified or terminated
                here we keep waiting and checking every second */
                os_cond_reltimedwait(&wait_node->wait_cond, lock,
