@@ -923,6 +923,8 @@ wasm_cluster_init_checkpointing_counter(WASMCluster *cluster, int count) {
     cluster->checkpointing_counter = counter;
     os_mutex_unlock(&cluster->lock);
 
+    printf("wasm_cluster_init_checkpointing_counter : %d", count);
+
     return counter;
 }
 

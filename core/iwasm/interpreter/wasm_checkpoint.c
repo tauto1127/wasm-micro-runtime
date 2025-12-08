@@ -37,19 +37,32 @@ signal_control_routine(void *arg)
             wasm_cluster_send_signal_all(cluster, WAMR_SIG_CHECKPOINT);
             // wasm_cluster_send_signal_all(cluster, WAMR_SIG_CHECKPOINT);
             while(1) {
-                os_cond_wait(&counter->cond, &counter->lock);
                 os_mutex_lock(&counter->lock);
-                printf("checkpointing_counter check: %d", counter->checkpointing_count);
+                os_cond_wait(&counter->cond, &counter->lock);
+                printf("checkpointing_counter check: %d\n", counter->checkpointing_count);
                 if (counter->checkpointing_count == 0) {
                     os_mutex_unlock(&counter->lock);
-                    printf("all normal threads wake up!!");
+                    printf("all normal threads wake up!!\n");
                     break;
                 }
                 os_mutex_unlock(&counter->lock);
             };
 
+            waits = wasm_cluster_get_waiting_thread_count(cluster);
+            counter = wasm_cluster_init_checkpointing_counter(cluster, waits);
             wasm_cluster_wake_up_threads(cluster);
-            printf("waiting threads wake up!!");
+            while(1) {
+                os_mutex_lock(&counter->lock);
+                os_cond_wait(&counter->cond, &counter->lock);
+                printf("checkpointing_counter check: %d\n", counter->checkpointing_count);
+                if (counter->checkpointing_count == 0) {
+                    os_mutex_unlock(&counter->lock);
+                    printf("all waiting threads wake up!!\n");
+                    break;
+                }
+                os_mutex_unlock(&counter->lock);
+            };
+            printf("end checkpoint\n");
         }
         else if (sig == SIGUSR1) {
             wasm_cluster_thread_continue_all(cluster);
