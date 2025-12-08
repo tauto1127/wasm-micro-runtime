@@ -5,6 +5,10 @@
 
 #include "thread_manager.h"
 #include "../common/wasm_c_api_internal.h"
+#include "platform_api_extension.h"
+#include "platform_api_vmcore.h"
+#include "platform_common.h"
+#include "wasm_exec_env.h"
 
 #if WASM_ENABLE_INTERP != 0
 #include "../interpreter/wasm_runtime.h"
@@ -907,6 +911,32 @@ wasm_cluster_thread_waiting_run(WASMExecEnv *exec_env)
     while (!wasm_cluster_thread_is_running(exec_env)) {
         os_cond_wait(&exec_env->wait_cond, &exec_env->wait_lock);
     }
+}
+
+struct AtomicCounter*
+wasm_cluster_init_checkpointing_counter(WASMCluster *cluster, int count) {
+    struct AtomicCounter* counter = wasm_runtime_malloc(sizeof(struct AtomicCounter));
+    counter->checkpointing_count = count;
+    os_mutex_init(&counter->lock);
+    os_cond_init(&counter->cond);
+    os_mutex_lock(&cluster->lock);
+    cluster->checkpointing_counter = counter;
+    os_mutex_unlock(&cluster->lock);
+
+    return counter;
+}
+
+void wasm_cluster_decrease_checkpointing_counter(WASMCluster *cluster) {
+    printf("descrise\n");
+    os_mutex_lock(&cluster->lock);
+    struct AtomicCounter* counter = cluster->checkpointing_counter;
+
+    os_mutex_lock(&counter->lock);
+    counter->checkpointing_count--;
+    os_cond_signal(&counter->cond);
+    os_mutex_unlock(&counter->lock);
+
+    os_mutex_unlock(&cluster->lock);
 }
 
 int wasm_cluster_get_thread_count(WASMCluster *cluster) {

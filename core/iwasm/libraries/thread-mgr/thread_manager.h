@@ -8,6 +8,7 @@
 
 #include "bh_common.h"
 #include "bh_log.h"
+#include "platform_internal.h"
 #include "wasm_export.h"
 #include "../interpreter/wasm.h"
 #include "../common/wasm_runtime_common.h"
@@ -19,6 +20,13 @@ extern "C" {
 #if WASM_ENABLE_DEBUG_INTERP != 0
 typedef struct WASMDebugInstance WASMDebugInstance;
 #endif
+
+struct AtomicCounter{
+    // C/R機構用
+    int checkpointing_count;
+    korp_mutex lock;
+    korp_cond cond;
+};
 
 struct WASMCluster {
     struct WASMCluster *next;
@@ -58,6 +66,7 @@ struct WASMCluster {
      */
     Vector exception_frames;
 #endif
+    struct AtomicCounter* checkpointing_counter;
 };
 
 void
@@ -207,6 +216,11 @@ wasm_cluster_send_signal_all(WASMCluster *cluster, uint32 signo);
  * https://github.com/bytecodealliance/wasm-micro-runtime/issues/1860 */
 void
 wasm_cluster_thread_waiting_run(WASMExecEnv *exec_env);
+
+struct AtomicCounter*
+wasm_cluster_init_checkpointing_counter(WASMCluster *cluster, int count);
+
+void wasm_cluster_decrease_checkpointing_counter(WASMCluster *cluster);
 
 int
 wasm_cluster_get_waiting_thread_count(WASMCluster *cluster);

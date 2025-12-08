@@ -10,6 +10,7 @@
 #include "wasm_loader.h"
 #include "wasm_memory.h"
 #include "wasm_checkpoint.h"
+#include "thread_manager.h"
 #include "../common/wasm_exec_env.h"
 #if WASM_ENABLE_GC != 0
 #include "../common/gc/gc_object.h"
@@ -1358,6 +1359,7 @@ wasm_interp_call_func_import(WASMModuleInstance *module_inst,
         if (IS_WAMR_CHECKPOINT_SIG(exec_env->current_status->signal_flag)) {\
             printf("CHECK_SUSPEND_FLAGS WAMR_CHECKPOINT_SIG\n");                          \
             SYNC_ALL_TO_FRAME();                                           \
+            wasm_cluster_decrease_checkpointing_counter(exec_env->cluster); \
             wasm_cluster_thread_waiting_run(exec_env);                 \
             os_mutex_unlock(&exec_env->wait_lock);\
             return;                                                    \
