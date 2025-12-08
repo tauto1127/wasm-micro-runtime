@@ -172,6 +172,7 @@ wasm_cluster_is_thread_terminated(WASMExecEnv *exec_env);
 #define WAMR_SIG_STOP (19)
 #define WAMR_SIG_TERM (15)
 #define WAMR_SIG_SINGSTEP (0x1ff)
+#define WAMR_SIG_CHECKPOINT (20)
 
 #define STATUS_RUNNING (0)
 #define STATUS_STOP (1)
@@ -182,6 +183,9 @@ wasm_cluster_is_thread_terminated(WASMExecEnv *exec_env);
 
 #define IS_WAMR_STOP_SIG(signo) \
     ((signo) == WAMR_SIG_STOP || (signo) == WAMR_SIG_TRAP)
+
+#define IS_WAMR_CHECKPOINT_SIG(signo) \
+    ((signo) == WAMR_SIG_CHECKPOINT)
 
 struct WASMCurrentEnvStatus {
     uint64 signal_flag : 32;

@@ -940,53 +940,11 @@ void wasm_cluster_wake_up_threads(WASMCluster *cluster) {
 void
 wasm_cluster_send_signal_all(WASMCluster *cluster, uint32 signo)
 {
-    // ================スレッド数の算出用================
-    os_mutex_lock(&cluster->lock);
-    WASMExecEnv *env2 = bh_list_first_elem(&cluster->exec_env_list);
-    while (env2) {
-        printf("env=%p tid=%p suspend=0x%x running=%u\n",
-               env2, (void *)env2->handle,
-               WASM_SUSPEND_FLAGS_GET(env2->suspend_flags),
-               env2->current_status ? env2->current_status->running_status : -1);
-        env2 = bh_list_elem_next(env2);
-    }
-    os_mutex_unlock(&cluster->lock);
-
-
-    uint32 total = 0;
-    uint32 blocking_total = 0;
-#if WASM_ENABLE_SHARED_MEMORY != 0 && WASM_ENABLE_THREAD_MGR != 0
-    uint32 atomic_wait_total = wasm_shared_memory_get_waiters_count();
-#else
-    uint32 atomic_wait_total = 0;
-#endif
-    os_mutex_lock(&cluster->lock);
-    WASMExecEnv *env = bh_list_first_elem(&cluster->exec_env_list);
-    while (env) {
-        if (WASM_SUSPEND_FLAGS_GET(env->suspend_flags)
-            & WASM_SUSPEND_FLAG_SUSPEND) {
-            total++; /* suspend要求で待機中のスレッド数 */
-        }
-        if (WASM_SUSPEND_FLAGS_GET(env->suspend_flags)
-            & WASM_SUSPEND_FLAG_BLOCKING) {
-            blocking_total++;
-        }
-        env = bh_list_elem_next(env);
-    }
-    os_mutex_unlock(&cluster->lock);
-
-    printf("waitしてるスレッドの総数:%d", total);
-    printf("blockingしてるスレッドの総数:%d", blocking_total);
-    printf("atomic waitしてるスレッドの総数:%d", atomic_wait_total);
-    printf("スレッドの総数:%d", bh_list_length(&cluster->exec_env_list));
-
     WASMExecEnv *exec_env = bh_list_first_elem(&cluster->exec_env_list);
     while (exec_env) {
         wasm_cluster_thread_send_signal(exec_env, signo);
         exec_env = bh_list_elem_next(exec_env);
     }
-    
-    
 }
 
 void

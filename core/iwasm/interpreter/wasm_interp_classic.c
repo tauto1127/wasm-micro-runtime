@@ -9,6 +9,7 @@
 #include "wasm_opcode.h"
 #include "wasm_loader.h"
 #include "wasm_memory.h"
+#include "wasm_checkpoint.h"
 #include "../common/wasm_exec_env.h"
 #if WASM_ENABLE_GC != 0
 #include "../common/gc/gc_object.h"
@@ -1354,13 +1355,20 @@ wasm_interp_call_func_import(WASMModuleInstance *module_inst,
 #define CHECK_SUSPEND_FLAGS()                                          \
     do {                                                               \
         os_mutex_lock(&exec_env->wait_lock);                           \
+        if (IS_WAMR_CHECKPOINT_SIG(exec_env->current_status->signal_flag)) {\
+            printf("CHECK_SUSPEND_FLAGS WAMR_CHECKPOINT_SIG\n");                          \
+            SYNC_ALL_TO_FRAME();                                           \
+            wasm_cluster_thread_waiting_run(exec_env);                 \
+            os_mutex_unlock(&exec_env->wait_lock);\
+            return;                                                    \
+        }\
         if (IS_WAMR_TERM_SIG(exec_env->current_status->signal_flag)) { \
-            printf("CHECK_SUSPEND_FLAGS called 上1355 %ln\n", &exec_env->handle);                          \
+            printf("CHECK_SUSPEND_FLAGS WAMR_TERM_SIG\n");                          \
             os_mutex_unlock(&exec_env->wait_lock);                     \
             return;                                                    \
         }                                                              \
         if (IS_WAMR_STOP_SIG(exec_env->current_status->signal_flag)) { \
-            printf("CHECK_SUSPEND_FLAGS called 上1360 %ln\n", &exec_env->handle);                          \
+            printf("CHECK_SUSPEND_FLAGS WAMR_STOP_SIG\n");                          \
             printf("thread: %ld\n", pthread_self());\
             SYNC_ALL_TO_FRAME();                                       \
             wasm_cluster_thread_waiting_run(exec_env);                 \
@@ -1466,46 +1474,46 @@ get_global_addr(uint8 *global_data, WASMGlobalInstance *global)
 static korp_tid signal_control_tid;
 static bool signal_control_started;
 
-static void *
-signal_control_routine(void *arg)
-{
-    // チェックポイント用スレッドの処理
-    WASMCluster *cluster = (WASMCluster *)arg;
-    sigset_t set;
-    int sig;
+// static void *
+// signal_control_routine(void *arg)
+// {
+//     // チェックポイント用スレッドの処理
+//     WASMCluster *cluster = (WASMCluster *)arg;
+//     sigset_t set;
+//     int sig;
 
-    sigemptyset(&set);
-    sigaddset(&set, SIGUSR1);
-    sigaddset(&set, SIGUSR2);
+//     sigemptyset(&set);
+//     sigaddset(&set, SIGUSR1);
+//     sigaddset(&set, SIGUSR2);
 
-    /* Loop forever waiting for SIGUSR1/2 and coordinate stop/resume */
-    while (true) {
-        if (sigwait(&set, &sig) != 0) {
-            continue;
-        }
-        if (sig == SIGUSR2) {
-            int waits = wasm_cluster_get_waiting_thread_count(cluster);
-            printf("signal_control_routine: received SIGUSR2, waiting threads: %d\n", waits);
-            int counts = wasm_cluster_get_thread_count(cluster);
-            printf("signal_control_routine: total threads: %d\n", counts);
+//     /* Loop forever waiting for SIGUSR1/2 and coordinate stop/resume */
+//     while (true) {
+//         if (sigwait(&set, &sig) != 0) {
+//             continue;
+//         }
+//         if (sig == SIGUSR2) {
+//             int waits = wasm_cluster_get_waiting_thread_count(cluster);
+//             printf("signal_control_routine: received SIGUSR2, 待機中スレッド: %d\n", waits);
+//             int counts = wasm_cluster_get_thread_count(cluster);
+//             printf("signal_control_routine: total threads: %d\n", counts);
 
-            // 停止シグナル
-            wasm_cluster_send_signal_all(cluster, WAMR_SIG_STOP);
-            
-            wasm_cluster_wake_up_threads(cluster);
-            sleep(10);
-            waits = wasm_cluster_get_waiting_thread_count(cluster);
-            printf("signal_control_routine: received SIGUSR2, waiting threads: %d\n", waits);
-            counts = wasm_cluster_get_thread_count(cluster);
-            printf("signal_control_routine: total threads: %d\n", counts);
-        }
-        else if (sig == SIGUSR1) {
-            wasm_cluster_thread_continue_all(cluster);
-        }
-    }
+//             // 停止シグナル
+//             wasm_cluster_send_signal_all(cluster, WAMR_SIG_STOP);
+//             // wasm_cluster_send_signal_all(cluster, WAMR_SIG_CHECKPOINT);
 
-    return NULL;
-}
+//             wasm_cluster_wake_up_threads(cluster);
+//             waits = wasm_cluster_get_waiting_thread_count(cluster);
+//             printf("signal_control_routine: received SIGUSR2, waiting threads: %d\n", waits);
+//             counts = wasm_cluster_get_thread_count(cluster);
+//             printf("signal_control_routine: total threads: %d\n", counts);
+//         }
+//         else if (sig == SIGUSR1) {
+//             wasm_cluster_thread_continue_all(cluster);
+//         }
+//     }
+
+//     return NULL;
+// }
 
 static void
 maybe_start_signal_control_thread(WASMCluster *cluster)
@@ -1633,7 +1641,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
 
 #if WASM_ENABLE_LABELS_AS_VALUES == 0
     while (frame_ip < frame_ip_end) {
-        
+
         opcode = *frame_ip++;
         switch (opcode) {
 #else
