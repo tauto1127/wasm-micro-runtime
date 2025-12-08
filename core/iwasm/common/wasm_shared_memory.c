@@ -5,6 +5,7 @@
 
 #include "bh_log.h"
 #include "wasm_shared_memory.h"
+#include "bh_hashmap.h"
 #if WASM_ENABLE_THREAD_MGR != 0
 #include "../libraries/thread-mgr/thread_manager.h"
 #endif
@@ -37,6 +38,9 @@ typedef struct AtomicWaitInfo {
 typedef struct AtomicWaitNode {
     bh_list_link l;
     uint8 status;
+#if WASM_ENABLE_THREAD_MGR != 0
+    WASMExecEnv *exec_env;
+#endif
     korp_cond wait_cond;
 } AtomicWaitNode;
 
@@ -322,6 +326,10 @@ wasm_runtime_atomic_wait(WASMModuleInstanceCommon *module, void *address,
     }
 
     wait_node->status = S_WAITING;
+#if WASM_ENABLE_THREAD_MGR != 0
+    /* remember the exec env to allow waking/inspection from wait_map */
+    wait_node->exec_env = exec_env;
+#endif
 
     /* Acquire the wait info, create new one if not exists */
     wait_info = acquire_wait_info(address, wait_node);
@@ -444,6 +452,7 @@ wasm_runtime_atomic_notify(WASMModuleInstanceCommon *module, void *address,
 
 #if WASM_ENABLE_THREAD_MGR != 0
 
+// waitノードを数えるコールバック
 static void
 wait_count_cb(void *key, void *value, void *user_data)
 {
@@ -458,6 +467,42 @@ wait_count_cb(void *key, void *value, void *user_data)
     }
 }
 
+static void
+wake_wait_node_cb(void *key, void *value, void *user_data)
+{
+    (void)key;
+    AtomicWaitInfo *info = (AtomicWaitInfo *)value;
+    uint32 *total = (uint32 *)user_data;
+    AtomicWaitNode *node = bh_list_first_elem(info->wait_list);
+
+    while (node) {
+        node->status = S_NOTIFIED;
+        os_cond_signal(&node->wait_cond);
+        (*total)++;
+        node = bh_list_elem_next(node);
+    }
+}
+
+HashMap *
+get_wait_map(void)
+{
+    return wait_map;
+}
+
+int
+get_wait_node_count(void)
+{
+    uint32 total = 0;
+
+    os_mutex_lock(&g_shared_memory_lock);
+    if (wait_map) {
+        bh_hash_map_traverse(wait_map, wait_count_cb, &total);
+    }
+    os_mutex_unlock(&g_shared_memory_lock);
+
+    return (int)total;
+}
+
 uint32
 wasm_shared_memory_get_waiters_count(void)
 {
@@ -466,6 +511,20 @@ wasm_shared_memory_get_waiters_count(void)
     os_mutex_lock(&g_shared_memory_lock);
     if (wait_map) {
         bh_hash_map_traverse(wait_map, wait_count_cb, &total);
+    }
+    os_mutex_unlock(&g_shared_memory_lock);
+
+    return total;
+}
+
+uint32
+wasm_shared_memory_wake_waiters(void)
+{
+    uint32 total = 0;
+
+    os_mutex_lock(&g_shared_memory_lock);
+    if (wait_map) {
+        bh_hash_map_traverse(wait_map, wake_wait_node_cb, &total);
     }
     os_mutex_unlock(&g_shared_memory_lock);
 

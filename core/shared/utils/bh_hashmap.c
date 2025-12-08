@@ -306,6 +306,34 @@ bh_hash_map_get_elem_struct_size()
     return (uint32)sizeof(HashMapElem);
 }
 
+int bh_hash_map_get_length(HashMap *hashmap){
+    uint32 index;
+    HashMapElem *elem;
+    int length = 0;
+
+    if (!hashmap) {
+        LOG_ERROR("HashMap get length failed: map is NULL.\n");
+        return -1;
+    }
+
+    if (hashmap->lock) {
+        os_mutex_lock(hashmap->lock);
+    }
+
+    for (index = 0; index < hashmap->size; index++) {
+        elem = hashmap->elements[index];
+        while (elem) {
+            length++;
+            elem = elem->next;
+        }
+    }
+
+    if (hashmap->lock) {
+        os_mutex_unlock(hashmap->lock);
+    }
+    return length;
+}
+
 bool
 bh_hash_map_traverse(HashMap *map, TraverseCallbackFunc callback,
                      void *user_data)

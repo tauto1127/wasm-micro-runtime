@@ -909,6 +909,34 @@ wasm_cluster_thread_waiting_run(WASMExecEnv *exec_env)
     }
 }
 
+int wasm_cluster_get_thread_count(WASMCluster *cluster) {
+    int count = 0;
+    os_mutex_lock(&cluster->lock);
+    WASMExecEnv *env = bh_list_first_elem(&cluster->exec_env_list);
+    while (env) {
+        count++;
+        env = bh_list_elem_next(env);
+    }
+    os_mutex_unlock(&cluster->lock);
+    return count;
+}
+
+
+int wasm_cluster_get_waiting_thread_count(WASMCluster *cluster) {
+    // int count = bh_list_length(get_wait_map());
+    //#TODO ここでwait_mapを取得
+    return get_wait_node_count();
+}
+
+void wasm_cluster_wake_up_threads(WASMCluster *cluster) {
+    os_mutex_lock(&cluster->lock);
+    // wait_mapにいる全てのwaitノードを起こす
+#if WASM_ENABLE_SHARED_MEMORY != 0 && WASM_ENABLE_THREAD_MGR != 0
+    wasm_shared_memory_wake_waiters();
+#endif
+    os_mutex_unlock(&cluster->lock);
+}
+
 void
 wasm_cluster_send_signal_all(WASMCluster *cluster, uint32 signo)
 {

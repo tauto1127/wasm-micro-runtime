@@ -29,6 +29,7 @@
 #endif
 #include <pthread.h>
 #include <signal.h>
+#include <wasm_shared_memory.h>
 
 typedef int32 CellType_I32;
 typedef int64 CellType_I64;
@@ -1403,10 +1404,12 @@ wasm_interp_call_func_import(WASMModuleInstance *module_inst,
 
 #define HANDLE_OP(opcode) HANDLE_##opcode:
 #define FETCH_OPCODE_AND_DISPATCH() do { \
-    HANDLE_OP_END(); \
+    printf("FETCH_OPCODE_AND_DISPATCH called by : %ld\n", pthread_self()); \
     goto *handle_table[*frame_ip++]; \
 }while(0)\
 
+// HANDLE_OP_END();
+// こっち
 #if WASM_ENABLE_THREAD_MGR != 0 && WASM_ENABLE_DEBUG_INTERP != 0
 #define HANDLE_OP_END()                                                   \
     do {                                                                  \
@@ -1466,6 +1469,7 @@ static bool signal_control_started;
 static void *
 signal_control_routine(void *arg)
 {
+    // チェックポイント用スレッドの処理
     WASMCluster *cluster = (WASMCluster *)arg;
     sigset_t set;
     int sig;
@@ -1480,7 +1484,20 @@ signal_control_routine(void *arg)
             continue;
         }
         if (sig == SIGUSR2) {
+            int waits = wasm_cluster_get_waiting_thread_count(cluster);
+            printf("signal_control_routine: received SIGUSR2, waiting threads: %d\n", waits);
+            int counts = wasm_cluster_get_thread_count(cluster);
+            printf("signal_control_routine: total threads: %d\n", counts);
+
+            // 停止シグナル
             wasm_cluster_send_signal_all(cluster, WAMR_SIG_STOP);
+            
+            wasm_cluster_wake_up_threads(cluster);
+            sleep(10);
+            waits = wasm_cluster_get_waiting_thread_count(cluster);
+            printf("signal_control_routine: received SIGUSR2, waiting threads: %d\n", waits);
+            counts = wasm_cluster_get_thread_count(cluster);
+            printf("signal_control_routine: total threads: %d\n", counts);
         }
         else if (sig == SIGUSR1) {
             wasm_cluster_thread_continue_all(cluster);
@@ -1520,6 +1537,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                                WASMFunctionInstance *cur_func,
                                WASMInterpFrame *prev_frame)
 {
+    printf("\n WASM_ENABLE_DEBUG_INTERP: %d\n",WASM_ENABLE_DEBUG_INTERP);
     maybe_start_signal_control_thread(exec_env->cluster);
     WASMMemoryInstance *memory = wasm_get_default_memory(module);
 #if !defined(OS_ENABLE_HW_BOUND_CHECK)              \

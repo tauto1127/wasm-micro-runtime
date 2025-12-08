@@ -59,6 +59,11 @@ wasm_runtime_atomic_notify(WASMModuleInstanceCommon *module, void *address,
 #if WASM_ENABLE_THREAD_MGR != 0
 uint32
 wasm_shared_memory_get_waiters_count(void);
+/* Wake all waiters (atomic.wait) and return number signaled */
+uint32
+wasm_shared_memory_wake_waiters(void);
+// wait_mapを取得するための関数
+int get_wait_node_count();
 #endif
 
 #ifdef __cplusplus

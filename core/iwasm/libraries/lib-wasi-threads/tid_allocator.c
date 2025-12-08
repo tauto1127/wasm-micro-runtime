@@ -20,9 +20,18 @@ tid_allocator_init(TidAllocator *tid_allocator)
     if (tid_allocator->ids == NULL)
         return false;
 
-    for (int64 i = tid_allocator->pos - 1; i >= 0; i--)
+    for (int64 i = tid_allocator->pos - 1; i >= 0; i--) {
         tid_allocator->ids[i] =
             (uint32)(TID_MIN + (tid_allocator->pos - 1 - i));
+        // printf("Initialized TID %d at position %lld\n",
+        //        (uint32)(TID_MIN + (tid_allocator->pos - 1 - i)), (long long)i);        
+        /*
+              Initialized TID 1 at position 3
+            Initialized TID 2 at position 2
+            Initialized TID 3 at position 1
+            Initialized TID 4 at position 0
+        */
+    }
 
     return true;
 }

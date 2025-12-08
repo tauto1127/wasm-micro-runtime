@@ -20,6 +20,8 @@ extern "C" {
 
 struct HashMap;
 typedef struct HashMap HashMap;
+struct HashMapElem;
+typedef struct HashMapElem HashMapElem;
 
 /* Hash function: to get the hash value of key. */
 typedef uint32 (*HashFunc)(const void *key);
@@ -145,6 +147,16 @@ bh_hash_map_get_struct_size(HashMap *hashmap);
  */
 uint32
 bh_hash_map_get_elem_struct_size(void);
+
+/**
+ * Get the number of elements in the hash map
+ *
+ * @param hashmap the hash map to calculate
+ *
+ * @return the number of elements in the hash map, -1 if failed
+ */
+int
+bh_hash_map_get_length(HashMap *hashmap);
 
 /**
  * Traverse the hash map and call the callback function

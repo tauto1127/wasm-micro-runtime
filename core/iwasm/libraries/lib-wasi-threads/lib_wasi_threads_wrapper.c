@@ -72,6 +72,7 @@ thread_start(void *arg)
 static int32
 thread_spawn_wrapper(wasm_exec_env_t exec_env, uint32 start_arg)
 {
+    printf("thread_spawn_wrapper start_arg=%u\n", start_arg);
     wasm_module_t module = wasm_exec_env_get_module(exec_env);
     wasm_module_inst_t module_inst = get_module_inst(exec_env);
     wasm_module_inst_t new_module_inst = NULL;
@@ -119,6 +120,7 @@ thread_spawn_wrapper(wasm_exec_env_t exec_env, uint32 start_arg)
     thread_start_arg->arg = start_arg;
     thread_start_arg->start_func = start_func;
 
+    // thread_startはただの関数ネイティブ
     ret = wasm_cluster_create_thread(exec_env, new_module_inst, false, 0, 0,
                                      thread_start, thread_start_arg);
     if (ret != 0) {

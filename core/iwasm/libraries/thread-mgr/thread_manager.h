@@ -204,6 +204,15 @@ wasm_cluster_send_signal_all(WASMCluster *cluster, uint32 signo);
 void
 wasm_cluster_thread_waiting_run(WASMExecEnv *exec_env);
 
+int
+wasm_cluster_get_waiting_thread_count(WASMCluster *cluster);
+
+void
+wasm_cluster_wake_up_threads(WASMCluster *cluster);
+
+int
+wasm_cluster_get_thread_count(WASMCluster *cluster);
+
 void
 wasm_cluster_wait_thread_status(WASMExecEnv *exec_env, uint32 *status);
 
