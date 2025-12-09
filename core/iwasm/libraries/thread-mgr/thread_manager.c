@@ -857,6 +857,27 @@ wasm_cluster_dup_c_api_imports(WASMModuleInstanceCommon *module_inst_dst,
     return true;
 }
 
+#if WASM_ENABLE_DEBUG_INTERP != 0 || WASM_ENABLE_CR != 0
+inline static bool
+wasm_cluster_thread_is_running(WASMExecEnv *exec_env)
+{
+    return exec_env->current_status->running_status == STATUS_RUNNING
+           || exec_env->current_status->running_status == STATUS_STEP;
+}
+#endif
+
+#if WASM_ENABLE_CR != 0
+void
+wasm_cluster_thread_checkpoint_ready(WASMExecEnv *exec_env)
+{
+    exec_env->current_status->running_status = STATUS_CHECKPOINT_READY;
+
+    while (!wasm_cluster_thread_is_running(exec_env)) {
+        os_cond_wait(&exec_env->wait_cond, &exec_env->wait_lock);
+    }
+}
+#endif
+
 #if WASM_ENABLE_DEBUG_INTERP != 0
 WASMCurrentEnvStatus *
 wasm_cluster_create_exenv_status()
@@ -877,13 +898,6 @@ void
 wasm_cluster_destroy_exenv_status(WASMCurrentEnvStatus *status)
 {
     wasm_runtime_free(status);
-}
-
-inline static bool
-wasm_cluster_thread_is_running(WASMExecEnv *exec_env)
-{
-    return exec_env->current_status->running_status == STATUS_RUNNING
-           || exec_env->current_status->running_status == STATUS_STEP;
 }
 
 void
@@ -927,7 +941,6 @@ notify_debug_instance_exit(WASMExecEnv *exec_env)
 
     on_thread_exit_event(cluster->debug_inst, exec_env);
 }
-
 void
 wasm_cluster_thread_waiting_run(WASMExecEnv *exec_env)
 {

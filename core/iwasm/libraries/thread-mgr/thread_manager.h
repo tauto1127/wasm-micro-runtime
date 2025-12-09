@@ -182,12 +182,17 @@ wasm_cluster_is_thread_terminated(WASMExecEnv *exec_env);
 #define WAMR_SIG_TERM (15)
 #define WAMR_SIG_SINGSTEP (0x1ff)
 #define WAMR_SIG_CHECKPOINT (20)
+#endif
 
+#if WASM_ENABLE_DEBUG_INTERP != 0 || WASM_ENABLE_CR != 0
 #define STATUS_RUNNING (0)
 #define STATUS_STOP (1)
 #define STATUS_EXIT (2)
 #define STATUS_STEP (3)
+#define STATUS_CHECKPOINT_READY (4)
+#endif
 
+#if WASM_ENABLE_DEBUG_INTERP != 0
 #define IS_WAMR_TERM_SIG(signo) ((signo) == WAMR_SIG_TERM)
 
 #define IS_WAMR_STOP_SIG(signo) \
@@ -216,6 +221,9 @@ wasm_cluster_send_signal_all(WASMCluster *cluster, uint32 signo);
  * https://github.com/bytecodealliance/wasm-micro-runtime/issues/1860 */
 void
 wasm_cluster_thread_waiting_run(WASMExecEnv *exec_env);
+
+void
+wasm_cluster_thread_checkpoint_ready(WASMExecEnv *exec_env);
 
 struct AtomicCounter*
 wasm_cluster_init_checkpointing_counter(WASMCluster *cluster, int count);
