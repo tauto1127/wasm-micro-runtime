@@ -871,10 +871,8 @@ void
 wasm_cluster_thread_checkpoint_ready(WASMExecEnv *exec_env)
 {
     exec_env->current_status->running_status = STATUS_CHECKPOINT_READY;
-
-    while (!wasm_cluster_thread_is_running(exec_env)) {
-        os_cond_wait(&exec_env->wait_cond, &exec_env->wait_lock);
-    }
+    /* Already resumed once via wasm_cluster_thread_waiting_run; avoid a
+       second wait here so a single SIGUSR1 is enough to continue. */
 }
 #endif /* WASM_ENABLE_CR != 0 */
 
