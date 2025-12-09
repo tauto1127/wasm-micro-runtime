@@ -53,23 +53,42 @@ signal_control_routine(void *arg)
                 // }
             };
             os_mutex_unlock(&counter->lock);
+            printf("waiting threadを起こします");
 
-            // waits = wasm_cluster_get_waiting_thread_count(cluster);
-            // counter = wasm_cluster_init_checkpointing_counter(cluster, waits);
-            // wasm_cluster_wake_up_threads(cluster);
-            // while(1) {
-            //     os_mutex_lock(&counter->lock);
-            //     os_cond_wait(&counter->cond, &counter->lock);
-            //     printf("checkpointing_counter check: %d\n", counter->checkpointing_count);
-            //     if (counter->checkpointing_count == 0) {
-            //         os_mutex_unlock(&counter->lock);
-            //         printf("all waiting threads wake up!!\n");
-            //         break;
-            //     }
-            //     os_mutex_unlock(&counter->lock);
-            // };
-            printf("end checkpoint\n");
-            wasm_cluster_reset_checkpointing_counter(cluster);
+            // =====スレッド同時停止======
+            wasm_cluster_wake_up_threads(cluster);
+            os_mutex_lock(&counter->lock);
+            for(;;) {
+                printf("checkpointing_counter check: %d\n", counter->checkpointing_count);
+                counts = wasm_cluster_get_thread_count(cluster);
+                if (counter->checkpointing_count == counts) {
+                    os_mutex_unlock(&counter->lock);
+                    printf("all waiting threads wake up!! checkpointing count: %d\n", counter->checkpointing_count);
+                    break;
+                }
+                os_cond_wait(&counter->cond, &counter->lock);
+            };
+
+            // ========チェックポイント開始========
+            printf("start checkpoint \n");
+            counter = wasm_cluster_init_checkpointing_counter(cluster, 0);
+            wasm_cluster_thread_continue_all(cluster);
+
+            // やっぱちゃんとカウントしないと，全部終わったか分からんな
+            os_mutex_lock(&counter->lock);
+            for(;;) {
+                printf("checkpointed_counter check: %d\n", counter->checkpointing_count);
+                counts = wasm_cluster_get_thread_count(cluster);
+                if (counter->checkpointing_count == counts) {
+                    printf("all waiting threads check pointed!! count: %d\n", counter->checkpointing_count);
+                    os_mutex_unlock(&counter->lock);
+                    break;
+                }
+                os_cond_wait(&counter->cond, &counter->lock);
+            };
+
+            exit(0);
+            // wasm_cluster_reset_checkpointing_counter(cluster);
         }
         else if (sig == SIGUSR1) {
             printf("SIGUSR1 called, %ld", pthread_self());

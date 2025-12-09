@@ -871,8 +871,6 @@ void
 wasm_cluster_thread_checkpoint_ready(WASMExecEnv *exec_env)
 {
     exec_env->current_status->running_status = STATUS_CHECKPOINT_READY;
-    /* Already resumed once via wasm_cluster_thread_waiting_run; avoid a
-       second wait here so a single SIGUSR1 is enough to continue. */
 }
 #endif /* WASM_ENABLE_CR != 0 */
 
@@ -969,6 +967,13 @@ wasm_cluster_thread_waiting_run(WASMExecEnv *exec_env)
 struct AtomicCounter *
 wasm_cluster_init_checkpointing_counter(WASMCluster *cluster, int count)
 {
+    if(cluster->checkpointing_counter != NULL) {
+        os_mutex_lock(&cluster->checkpointing_counter->lock);
+        cluster->checkpointing_counter->checkpointing_count = count;
+        os_mutex_unlock(&cluster->checkpointing_counter->lock);
+
+        return cluster->checkpointing_counter;
+    }
     struct AtomicCounter *counter =
         wasm_runtime_malloc(sizeof(struct AtomicCounter));
     counter->checkpointing_count = count;
@@ -978,7 +983,7 @@ wasm_cluster_init_checkpointing_counter(WASMCluster *cluster, int count)
     cluster->checkpointing_counter = counter;
     os_mutex_unlock(&cluster->lock);
 
-    printf("wasm_cluster_init_checkpointing_counter : %d", count);
+    printf("wasm_cluster_init_checkpointing_counter : %d\n", count);
 
     return counter;
 }
@@ -1000,14 +1005,13 @@ wasm_cluster_decrease_checkpointing_counter(WASMCluster *cluster)
 void
 wasm_cluster_increase_checkpointing_counter(WASMCluster *cluster)
 {
-    printf("wasm_cluster_increase_checkpointing_counter\n");
     os_mutex_lock(&cluster->lock);
     struct AtomicCounter *counter = cluster->checkpointing_counter;
     os_mutex_unlock(&cluster->lock);
 
     os_mutex_lock(&counter->lock);
-    printf("wasm_cluster_increase_checkpointing_counter2\n");
     counter->checkpointing_count++;
+    printf("wasm_cluster_increase_checkpointing_counter: %d\n", counter->checkpointing_count);
     os_cond_signal(&counter->cond);
     os_mutex_unlock(&counter->lock);
 }

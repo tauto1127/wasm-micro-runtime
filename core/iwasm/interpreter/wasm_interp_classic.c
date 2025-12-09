@@ -3,6 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
  */
 
+#include "platform_api_extension.h"
+#include "platform_api_vmcore.h"
 #include "wasm_interp.h"
 #include "bh_log.h"
 #include "wasm_runtime.h"
@@ -11,6 +13,7 @@
 #include "wasm_memory.h"
 #include "wasm_checkpoint.h"
 #include "thread_manager.h"
+#include "lib_wasi_threads_wrapper.h"
 #include "../common/wasm_exec_env.h"
 #if WASM_ENABLE_GC != 0
 #include "../common/gc/gc_object.h"
@@ -1404,7 +1407,7 @@ wasm_interp_call_func_import(WASMModuleInstance *module_inst,
 #define SUSPENSION_UNLOCK()
 #endif /* WASM_SUSPEND_FLAGS_IS_ATOMIC != 0 */
 
-// デバッグモードが無効の時
+// デバッグモードが無効&&CRが有効の時
 #if WASM_ENABLE_CR != 0
 #define CHECK_SUSPEND_FLAGS()                                         \
     do {                                                              \
@@ -1414,8 +1417,23 @@ wasm_interp_call_func_import(WASMModuleInstance *module_inst,
             SYNC_ALL_TO_FRAME();                                           \
             wasm_cluster_increase_checkpointing_counter(exec_env->cluster); \
             wasm_cluster_thread_waiting_run(exec_env);                 \
-            wasm_cluster_thread_checkpoint_ready(exec_env); \
-            os_mutex_unlock(&exec_env->wait_lock);\
+            if(exec_env->thread_arg != NULL) {\
+                ThreadStartArg *thread_arg = (ThreadStartArg *)exec_env->thread_arg;\
+                int32 thread_id = thread_arg->thread_id;\
+                uint32 arg = thread_arg->arg;\
+                printf("Thread %u checkpointed\n", thread_id);\
+            }else {\
+                printf("Main thread checkpointed\n");\
+            }\
+            /*関数は移行先で再探索しよう． */\
+            /* =============チェッックポイント=========== */\
+            /*ここでチェックポイントする */\
+            /* wasm_runtime_lookup_function(new_module_inst, THREAD_START_FUNCTION);*/\
+            /*wasm_function_inst_t* func = thread_arg->func;*/\
+            /*os_mutex_unlock(&exec_env->wait_lock);\*/\
+            wasm_cluster_increase_checkpointing_counter(exec_env->cluster);\
+            wasm_cluster_thread_send_signal(exec_env, WAMR_SIG_CHECKPOINT);\
+            wasm_cluster_thread_waiting_run(exec_env);\
         }\
         if (WASM_SUSPEND_FLAGS_GET(exec_env->suspend_flags)           \
             & WASM_SUSPEND_FLAG_TERMINATE) {                          \
