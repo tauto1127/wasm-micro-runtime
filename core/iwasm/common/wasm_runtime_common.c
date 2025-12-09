@@ -10,6 +10,7 @@
 #include "wasm_native.h"
 #include "wasm_runtime_common.h"
 #include "wasm_memory.h"
+#include "wasm_dump.h"
 #if WASM_ENABLE_INTERP != 0
 #include "../interpreter/wasm_runtime.h"
 #endif
@@ -38,6 +39,7 @@
 #include "../compilation/aot_llvm.h"
 #endif
 #include "../common/wasm_c_api_internal.h"
+#include "../migration/wasm_restore.h"
 #include "../../version.h"
 
 /**
@@ -775,6 +777,14 @@ wasm_runtime_full_init_internal(RuntimeInitArgs *init_args)
                                           init_args->n_native_symbols)) {
         wasm_runtime_destroy();
         return false;
+    }
+
+    if (init_args->restore_flag) {
+        set_restore_flag(true);
+    }
+    
+    if (init_args->image_dir) {
+        set_image_dir(init_args->image_dir);
     }
 
 #if WASM_ENABLE_THREAD_MGR != 0
@@ -7383,4 +7393,8 @@ wasm_runtime_is_underlying_binary_freeable(WASMModuleCommon *const module)
 #endif /* WASM_ENABLE_AOT != 0 */
 
     return true;
+}
+
+void wasm_runtime_checkpoint() {
+    wasm_set_checkpoint(true);
 }

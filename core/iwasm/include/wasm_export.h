@@ -218,6 +218,9 @@ typedef struct RuntimeInitArgs {
     uint32_t llvm_jit_size_level;
     /* Segue optimization flags for LLVM JIT */
     uint32_t segue_flags;
+    /* Restore from interp.img and frame.img */
+    bool restore_flag;
+    char image_dir[128];
     /**
      * If enabled
      * - llvm-jit will output a jitdump file for `perf inject`
@@ -527,6 +530,13 @@ wasm_runtime_unload(wasm_module_t module);
  */
 char *
 wasm_runtime_get_module_hash(wasm_module_t module);
+
+/**
+ * Raise a chckpoint flag
+ *
+ */
+WASM_RUNTIME_API_EXTERN void
+wasm_runtime_checkpoint();
 
 /**
  * Set WASI parameters.

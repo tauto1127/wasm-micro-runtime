@@ -5,6 +5,7 @@
 
 #include "platform_api_extension.h"
 #include "platform_api_vmcore.h"
+#include <time.h>
 #include "wasm_interp.h"
 #include "bh_log.h"
 #include "wasm_runtime.h"
@@ -15,6 +16,9 @@
 #include "thread_manager.h"
 #include "lib_wasi_threads_wrapper.h"
 #include "../common/wasm_exec_env.h"
+#include "../migration/wasm_migration.h"
+#include "../migration/wasm_dump.h"
+#include "../migration/wasm_restore.h"
 #if WASM_ENABLE_GC != 0
 #include "../common/gc/gc_object.h"
 #include "mem_alloc.h"
@@ -1476,9 +1480,58 @@ wasm_interp_call_func_import(WASMModuleInstance *module_inst,
 #if WASM_ENABLE_LABELS_AS_VALUES != 0
 
 #define HANDLE_OP(opcode) HANDLE_##opcode:
-#define FETCH_OPCODE_AND_DISPATCH() do { \
-    goto *handle_table[*frame_ip++]; \
-}while(0)\
+
+#define DO_CHECKPOINT()                                                     \
+    do {                                                                    \
+        SYNC_ALL_TO_FRAME();                                                \
+        uint8 *dummy_ip;                                                    \
+        uint32 *dummy_sp;                                                   \
+        dummy_ip = frame_ip;                                                \
+        dummy_sp = frame_sp;                                                \
+        int rc = wasm_dump(exec_env, module, memory,                        \
+            globals, global_data, global_addr, cur_func,                    \
+            frame, dummy_ip, dummy_sp, frame_csp,                           \
+            frame_ip_end, else_addr, end_addr, maddr, done_flag);           \
+        if (rc < 0) {                                                       \
+            perror("failed to dump\n");                                     \
+            exit(1);                                                        \
+        }                                                                   \
+        LOG_DEBUG("dispatch_count: %d\n", dispatch_count);                  \
+        exit(0);                                                            \
+    } while(0)
+
+
+int get_env_int(const char *env_var, int default_value) {
+    char *env_val = getenv(env_var);
+    if (!env_val) {
+        return default_value;  // 環境変数が未設定ならデフォルト値
+    }
+
+    char *endptr;
+    errno = 0;  // errno をリセット
+    long val = strtol(env_val, &endptr, 10);
+
+    // 変換エラー（未変換部分がある or 範囲外）
+    if (errno == ERANGE || val > INT_MAX || val < INT_MIN || *endptr != '\0') {
+        return default_value;
+    }
+
+    return (int)val;
+}
+static int dispatch_count = 0;
+int ckpt_point = -1;
+#define CHECK_DUMP()                                                        \
+    dispatch_count++;                                                       \
+    if (wasm_get_checkpoint() || dispatch_count == ckpt_point) {            \
+        DO_CHECKPOINT();                                                    \
+    }
+
+// #define FETCH_OPCODE_AND_DISPATCH() goto *handle_table[*frame_ip++]
+#define FETCH_OPCODE_AND_DISPATCH()                                     \
+do {                                                                    \
+/*CHECK_DUMP()                                                        */\
+    goto *handle_table[*frame_ip++];                                    \
+} while(0);
 
 // HANDLE_OP_END();
 #if WASM_ENABLE_THREAD_MGR != 0 && WASM_ENABLE_DEBUG_INTERP != 0
@@ -1495,6 +1548,7 @@ wasm_interp_call_func_import(WASMModuleInstance *module_inst,
             wasm_cluster_thread_waiting_run(exec_env);                    \
         }                                                                 \
         os_mutex_unlock(&exec_env->wait_lock);                            \
+        /*CHECK_DUMP();*/                                                     \
         goto *handle_table[*frame_ip++];                                  \
     } while (0)
 #else
@@ -1537,47 +1591,6 @@ get_global_addr(uint8 *global_data, WASMGlobalInstance *global)
 static korp_tid signal_control_tid;
 static bool signal_control_started;
 
-// static void *
-// signal_control_routine(void *arg)
-// {
-//     // チェックポイント用スレッドの処理
-//     WASMCluster *cluster = (WASMCluster *)arg;
-//     sigset_t set;
-//     int sig;
-
-//     sigemptyset(&set);
-//     sigaddset(&set, SIGUSR1);
-//     sigaddset(&set, SIGUSR2);
-
-//     /* Loop forever waiting for SIGUSR1/2 and coordinate stop/resume */
-//     while (true) {
-//         if (sigwait(&set, &sig) != 0) {
-//             continue;
-//         }
-//         if (sig == SIGUSR2) {
-//             int waits = wasm_cluster_get_waiting_thread_count(cluster);
-//             printf("signal_control_routine: received SIGUSR2, 待機中スレッド: %d\n", waits);
-//             int counts = wasm_cluster_get_thread_count(cluster);
-//             printf("signal_control_routine: total threads: %d\n", counts);
-
-//             // 停止シグナル
-//             wasm_cluster_send_signal_all(cluster, WAMR_SIG_STOP);
-//             // wasm_cluster_send_signal_all(cluster, WAMR_SIG_CHECKPOINT);
-
-//             wasm_cluster_wake_up_threads(cluster);
-//             waits = wasm_cluster_get_waiting_thread_count(cluster);
-//             printf("signal_control_routine: received SIGUSR2, waiting threads: %d\n", waits);
-//             counts = wasm_cluster_get_thread_count(cluster);
-//             printf("signal_control_routine: total threads: %d\n", counts);
-//         }
-//         else if (sig == SIGUSR1) {
-//             wasm_cluster_thread_continue_all(cluster);
-//         }
-//     }
-
-//     return NULL;
-// }
-
 static void
 maybe_start_signal_control_thread(WASMCluster *cluster)
 {
@@ -1603,6 +1616,20 @@ maybe_start_signal_control_thread(WASMCluster *cluster)
 #else
 #define maybe_start_signal_control_thread(cluster) (void)(cluster)
 #endif
+
+static void clear_refs() {
+    int fd;
+    char *v = "4";
+
+    fd = open("/proc/self/clear_refs", O_WRONLY);
+    if (write(fd, v, 3) < 3) {
+        perror("Can't clear soft-dirty bit");
+    }
+    close(fd);
+}
+
+bool done_flag = false;
+
 static void
 wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                                WASMExecEnv *exec_env,
@@ -1648,6 +1675,8 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
     uint32 local_idx, local_offset, global_idx;
     uint8 local_type, *global_addr;
     uint32 cache_index, type_index, param_cell_num, cell_num;
+    // TODO: option引数から設定できるようにする
+    ckpt_point = get_env_int("CKPT_POINT", INT32_MAX);
 #if WASM_ENABLE_EXCE_HANDLING != 0
     int32_t exception_tag_index;
 #endif
@@ -1703,6 +1732,65 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
 #endif
     // WASM_ENABLE_LABELS_AS_VALUES: 1
 
+#if BH_PLATFORM_LINUX == 1
+    // Clear soft-dirty bit
+    clear_refs();
+#endif
+
+    // リストアの初期化時間の計測(終了)
+    struct timespec ts1;
+    clock_gettime(CLOCK_MONOTONIC, &ts1);
+    fprintf(stderr, "boot_end, %lu\n", (uint64_t)(ts1.tv_sec*1e9) + ts1.tv_nsec);
+
+    if (get_restore_flag()) {
+        // bool done_flag;
+        int rc;
+        struct timespec ts2;
+
+        clock_gettime(CLOCK_MONOTONIC, &ts1);
+        frame = wasm_restore_stack(&exec_env);
+        clock_gettime(CLOCK_MONOTONIC, &ts2);
+        fprintf(stderr, "stack, %lu\n", get_time(ts1, ts2));
+        if (frame == NULL) {
+            perror("Error:wasm_interp_func_bytecode:frame is NULL\n");
+            return;
+        }
+        // debug_wasm_interp_frame(frame, module->e->functions);
+
+        cur_func = frame->function;
+        prev_frame = frame->prev_frame;
+        if (cur_func == NULL) {
+            perror("Error:wasm_interp_func_bytecode:cur_func is null\n");
+            return;
+        }
+        if (prev_frame == NULL) {
+            perror("Error:wasm_interp_func_bytecode:prev_frame is null\n");
+            return;
+        }
+
+        uint8 *dummy_ip;
+        uint32 *dummy_lp, *dummy_sp;
+        rc = wasm_restore(&module, &exec_env, &cur_func, &prev_frame,
+                        &memory, &globals, &global_data, &global_addr,
+                        &frame, &dummy_ip, &dummy_lp, &dummy_sp, &frame_csp,
+                        &frame_ip_end, &else_addr, &end_addr, &maddr, &done_flag);
+        if (rc < 0) {
+            // error
+            perror("failed to restore\n");
+            return;
+        }
+        frame_ip = dummy_ip;
+        frame_lp = dummy_lp;
+        frame_sp = dummy_sp;
+        frame->ip = frame_ip;
+        linear_mem_size = memory ? memory->memory_data_size : 0;
+
+        frame_lp = frame->lp;
+        wasm_set_checkpoint(false);
+        UPDATE_ALL_FROM_FRAME();
+        FETCH_OPCODE_AND_DISPATCH();
+    }
+
 #if WASM_ENABLE_LABELS_AS_VALUES == 0
     while (frame_ip < frame_ip_end) {
 
@@ -1721,7 +1809,14 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                 goto got_exception;
             }
 
-            HANDLE_OP(WASM_OP_NOP) { HANDLE_OP_END(); }
+            HANDLE_OP(WASM_OP_NOP) {
+                // NOPでチェックポイント
+                bool is_nop_checkpoint = getenv("NOP_CKPT");
+                if (is_nop_checkpoint) {
+                    wasm_set_checkpoint(true);
+                }
+                HANDLE_OP_END();
+            }
 
 #if WASM_ENABLE_EXCE_HANDLING != 0
             HANDLE_OP(WASM_OP_RETHROW)
