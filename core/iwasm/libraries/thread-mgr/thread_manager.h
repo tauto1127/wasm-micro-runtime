@@ -181,6 +181,9 @@ wasm_cluster_is_thread_terminated(WASMExecEnv *exec_env);
 #define WAMR_SIG_STOP (19)
 #define WAMR_SIG_TERM (15)
 #define WAMR_SIG_SINGSTEP (0x1ff)
+#endif
+
+#if WASM_ENABLE_DEBUG_INTERP != 0 || WASM_ENABLE_CR != 0
 #define WAMR_SIG_CHECKPOINT (20)
 #endif
 
@@ -197,10 +200,12 @@ wasm_cluster_is_thread_terminated(WASMExecEnv *exec_env);
 
 #define IS_WAMR_STOP_SIG(signo) \
     ((signo) == WAMR_SIG_STOP || (signo) == WAMR_SIG_TRAP)
+#endif
 
-#define IS_WAMR_CHECKPOINT_SIG(signo) \
-    ((signo) == WAMR_SIG_CHECKPOINT)
-
+#if WASM_ENABLE_DEBUG_INTERP != 0 || WASM_ENABLE_CR != 0
+#define IS_WAMR_CHECKPOINT_SIG(signo) ((signo) == WAMR_SIG_CHECKPOINT)
+#endif
+#if WASM_ENABLE_DEBUG_INTERP != 0 || WASM_ENABLE_CR != 0
 struct WASMCurrentEnvStatus {
     uint64 signal_flag : 32;
     uint64 step_count : 16;
@@ -259,10 +264,12 @@ wasm_cluster_thread_send_signal(WASMExecEnv *exec_env, uint32 signo);
 void
 wasm_cluster_thread_step(WASMExecEnv *exec_env);
 
+#if WASM_ENABLE_DEBUG_INTERP != 0
 void
 wasm_cluster_set_debug_inst(WASMCluster *cluster, WASMDebugInstance *inst);
+#endif
 
-#endif /* end of WASM_ENABLE_DEBUG_INTERP != 0 */
+#endif /* end of WASM_ENABLE_DEBUG_INTERP != 0 || WASM_ENABLE_CR != 0 */
 
 void
 wasm_cluster_traverse_lock(WASMExecEnv *exec_env);

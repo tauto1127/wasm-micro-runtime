@@ -876,9 +876,9 @@ wasm_cluster_thread_checkpoint_ready(WASMExecEnv *exec_env)
         os_cond_wait(&exec_env->wait_cond, &exec_env->wait_lock);
     }
 }
-#endif
+#endif /* WASM_ENABLE_CR != 0 */
 
-#if WASM_ENABLE_DEBUG_INTERP != 0
+#if WASM_ENABLE_DEBUG_INTERP != 0 || WASM_ENABLE_CR != 0
 WASMCurrentEnvStatus *
 wasm_cluster_create_exenv_status()
 {
@@ -912,6 +912,7 @@ wasm_cluster_thread_send_signal(WASMExecEnv *exec_env, uint32 signo)
     exec_env->current_status->signal_flag = signo;
 }
 
+#if WASM_ENABLE_DEBUG_INTERP != 0
 static void
 notify_debug_instance(WASMExecEnv *exec_env)
 {
@@ -941,6 +942,20 @@ notify_debug_instance_exit(WASMExecEnv *exec_env)
 
     on_thread_exit_event(cluster->debug_inst, exec_env);
 }
+#else
+static inline void
+notify_debug_instance(WASMExecEnv *exec_env)
+{
+    (void)exec_env;
+}
+
+static inline void
+notify_debug_instance_exit(WASMExecEnv *exec_env)
+{
+    (void)exec_env;
+}
+#endif /* WASM_ENABLE_DEBUG_INTERP */
+
 void
 wasm_cluster_thread_waiting_run(WASMExecEnv *exec_env)
 {
@@ -952,9 +967,12 @@ wasm_cluster_thread_waiting_run(WASMExecEnv *exec_env)
     }
 }
 
-struct AtomicCounter*
-wasm_cluster_init_checkpointing_counter(WASMCluster *cluster, int count) {
-    struct AtomicCounter* counter = wasm_runtime_malloc(sizeof(struct AtomicCounter));
+#if WASM_ENABLE_CR != 0
+struct AtomicCounter *
+wasm_cluster_init_checkpointing_counter(WASMCluster *cluster, int count)
+{
+    struct AtomicCounter *counter =
+        wasm_runtime_malloc(sizeof(struct AtomicCounter));
     counter->checkpointing_count = count;
     os_mutex_init(&counter->lock);
     os_cond_init(&counter->cond);
@@ -967,9 +985,11 @@ wasm_cluster_init_checkpointing_counter(WASMCluster *cluster, int count) {
     return counter;
 }
 
-void wasm_cluster_decrease_checkpointing_counter(WASMCluster *cluster) {
+void
+wasm_cluster_decrease_checkpointing_counter(WASMCluster *cluster)
+{
     os_mutex_lock(&cluster->lock);
-    struct AtomicCounter* counter = cluster->checkpointing_counter;
+    struct AtomicCounter *counter = cluster->checkpointing_counter;
 
     os_mutex_lock(&counter->lock);
     counter->checkpointing_count--;
@@ -979,10 +999,12 @@ void wasm_cluster_decrease_checkpointing_counter(WASMCluster *cluster) {
     os_mutex_unlock(&cluster->lock);
 }
 
-void wasm_cluster_increase_checkpointing_counter(WASMCluster *cluster) {
+void
+wasm_cluster_increase_checkpointing_counter(WASMCluster *cluster)
+{
     printf("wasm_cluster_increase_checkpointing_counter\n");
     os_mutex_lock(&cluster->lock);
-    struct AtomicCounter* counter = cluster->checkpointing_counter;
+    struct AtomicCounter *counter = cluster->checkpointing_counter;
     os_mutex_unlock(&cluster->lock);
 
     os_mutex_lock(&counter->lock);
@@ -990,16 +1012,19 @@ void wasm_cluster_increase_checkpointing_counter(WASMCluster *cluster) {
     counter->checkpointing_count++;
     os_cond_signal(&counter->cond);
     os_mutex_unlock(&counter->lock);
-
 }
 
-void wasm_cluster_reset_checkpointing_counter(WASMCluster *cluster) {
+void
+wasm_cluster_reset_checkpointing_counter(WASMCluster *cluster)
+{
     os_mutex_lock(&cluster->lock);
     cluster->checkpointing_counter = NULL;
     os_mutex_unlock(&cluster->lock);
 }
 
-int wasm_cluster_get_thread_count(WASMCluster *cluster) {
+int
+wasm_cluster_get_thread_count(WASMCluster *cluster)
+{
     int count = 0;
     os_mutex_lock(&cluster->lock);
     WASMExecEnv *env = bh_list_first_elem(&cluster->exec_env_list);
@@ -1011,18 +1036,23 @@ int wasm_cluster_get_thread_count(WASMCluster *cluster) {
     return count;
 }
 
-int wasm_cluster_get_waiting_thread_count(WASMCluster *cluster) {
+int
+wasm_cluster_get_waiting_thread_count(WASMCluster *cluster)
+{
     return get_wait_node_count();
 }
 
-void wasm_cluster_wake_up_threads(WASMCluster *cluster) {
+void
+wasm_cluster_wake_up_threads(WASMCluster *cluster)
+{
     os_mutex_lock(&cluster->lock);
-    // wait_mapにいる全てのwaitノードを起こす
 #if WASM_ENABLE_SHARED_MEMORY != 0 && WASM_ENABLE_THREAD_MGR != 0
+    /* Wake all waiters stored in wait_map */
     wasm_shared_memory_wake_waiters();
 #endif
     os_mutex_unlock(&cluster->lock);
 }
+#endif /* WASM_ENABLE_CR != 0 */
 
 void
 wasm_cluster_send_signal_all(WASMCluster *cluster, uint32 signo)
@@ -1041,9 +1071,11 @@ wasm_cluster_thread_exited(WASMExecEnv *exec_env)
     notify_debug_instance_exit(exec_env);
 }
 
-void wasm_cluster_thread_continue_all(WASMCluster *cluster) {
+void
+wasm_cluster_thread_continue_all(WASMCluster *cluster)
+{
     WASMExecEnv *exec_env = bh_list_first_elem(&cluster->exec_env_list);
-    while(exec_env) {
+    while (exec_env) {
         wasm_cluster_thread_continue(exec_env);
         exec_env = bh_list_elem_next(exec_env);
     }
@@ -1068,13 +1100,15 @@ wasm_cluster_thread_step(WASMExecEnv *exec_env)
     os_mutex_unlock(&exec_env->wait_lock);
 }
 
+#if WASM_ENABLE_DEBUG_INTERP != 0
 void
 wasm_cluster_set_debug_inst(WASMCluster *cluster, WASMDebugInstance *inst)
 {
     cluster->debug_inst = inst;
 }
+#endif /* WASM_ENABLE_DEBUG_INTERP != 0 */
 
-#endif /* end of WASM_ENABLE_DEBUG_INTERP */
+#endif /* end of WASM_ENABLE_DEBUG_INTERP != 0 || WASM_ENABLE_CR != 0 */
 
 /* Check whether the exec_env is in one of all clusters, the caller
    should add lock to the cluster list before calling us */

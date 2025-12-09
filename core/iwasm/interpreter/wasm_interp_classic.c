@@ -1408,7 +1408,6 @@ wasm_interp_call_func_import(WASMModuleInstance *module_inst,
 #if WASM_ENABLE_CR != 0
 #define CHECK_SUSPEND_FLAGS()                                         \
     do {                                                              \
-        printf("CHECK_SUSPEND_FLAGS called 下 %ln\n", &exec_env->handle);                          \
         WASM_SUSPEND_FLAGS_LOCK(exec_env->wait_lock);                 \
         if (IS_WAMR_CHECKPOINT_SIG(exec_env->current_status->signal_flag)) {\
             printf("CHECKPOINT_SIG\n");\
@@ -1436,7 +1435,6 @@ wasm_interp_call_func_import(WASMModuleInstance *module_inst,
 #else
 #define CHECK_SUSPEND_FLAGS()                                         \
     do {                                                              \
-        printf("CHECK_SUSPEND_FLAGS called 下 %ln\n", &exec_env->handle);                          \
         WASM_SUSPEND_FLAGS_LOCK(exec_env->wait_lock);                 \
         if (WASM_SUSPEND_FLAGS_GET(exec_env->suspend_flags)           \
             & WASM_SUSPEND_FLAG_TERMINATE) {                          \
@@ -1461,12 +1459,10 @@ wasm_interp_call_func_import(WASMModuleInstance *module_inst,
 
 #define HANDLE_OP(opcode) HANDLE_##opcode:
 #define FETCH_OPCODE_AND_DISPATCH() do { \
-    printf("FETCH_OPCODE_AND_DISPATCH called by : %ld\n", pthread_self()); \
     goto *handle_table[*frame_ip++]; \
 }while(0)\
 
 // HANDLE_OP_END();
-// こっち
 #if WASM_ENABLE_THREAD_MGR != 0 && WASM_ENABLE_DEBUG_INTERP != 0
 #define HANDLE_OP_END()                                                   \
     do {                                                                  \
@@ -1519,7 +1515,7 @@ get_global_addr(uint8 *global_data, WASMGlobalInstance *global)
 #endif
 }
 
-#if WASM_ENABLE_THREAD_MGR != 0 && WASM_ENABLE_DEBUG_INTERP != 0
+#if WASM_ENABLE_THREAD_MGR != 0 && WASM_ENABLE_CR != 0
 static korp_tid signal_control_tid;
 static bool signal_control_started;
 
