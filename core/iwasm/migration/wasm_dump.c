@@ -509,13 +509,13 @@ int wasm_dump_program_counter(
 }
 
 // thread_id, スレッドの開始関数の引数をdump
-int wasm_dump_thread_attrs(WASMExecEnv *exec_env, char* file_prefix) {
+int wasm_dump_thread_states(WASMExecEnv *exec_env, char* file_prefix) {
     ThreadStartArg *thread_arg = (ThreadStartArg *)exec_env->thread_arg;
 
     if (thread_arg == NULL) return 0;
 
     FILE *fp;
-    char file_name[MAX_FILE_NAME_LENGTH] = "thread_addr.img";
+    char file_name[MAX_FILE_NAME_LENGTH] = "thread_sta.img";
     str_add_prefix(file_name, file_prefix);
     fp = open_image(file_name, "wb");
     if (fp == NULL) {
@@ -594,7 +594,7 @@ int wasm_dump(WASMExecEnv *exec_env,
 
     // dump threaed attrs if needed
     clock_gettime(CLOCK_MONOTONIC, &ts1);
-    rc = wasm_dump_thread_attrs(exec_env, file_prefix);
+    rc = wasm_dump_thread_states(exec_env, file_prefix);
     clock_gettime(CLOCK_MONOTONIC, &ts2);
     fprintf(stderr, "%sthread attrs, %lu\n", file_prefix, get_time(ts1, ts2));
     if (rc < 0) {
