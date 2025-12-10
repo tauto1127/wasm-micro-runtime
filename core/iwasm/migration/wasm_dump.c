@@ -512,7 +512,17 @@ int wasm_dump_program_counter(
 int wasm_dump_thread_states(WASMExecEnv *exec_env, char* file_prefix) {
     ThreadStartArg *thread_arg = (ThreadStartArg *)exec_env->thread_arg;
 
-    if (thread_arg == NULL) return 0;
+    if (thread_arg == NULL) {
+        FILE *fp = open_image("thread_count.img", "wb");
+        if (fp == NULL) {
+            fprintf(stderr, "failed to open %s\n", "thread_count");
+            return -1;
+        }
+        int16 thread_count = wasm_cluster_get_thread_count(exec_env->cluster);
+        dump_value(&thread_count, sizeof(int16), 1, fp);
+
+        return 0;
+    }
 
     FILE *fp;
     char file_name[MAX_FILE_NAME_LENGTH] = "thread_sta.img";
