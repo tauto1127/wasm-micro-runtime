@@ -1433,10 +1433,10 @@ wasm_interp_call_func_import(WASMModuleInstance *module_inst,
             if(exec_env->thread_arg != NULL) {\
                 arg = thread_arg->arg; \
                 int32 thread_id = thread_arg->thread_id;\
-                sprintf(thread_id_ch, "%d", thread_id); \
+                sprintf(thread_id_ch, "%d-", thread_id); \
                 printf("thread %d checkpoint started\n", thread_id);\
             }else { \
-                strcpy(thread_id_ch, "main");\
+                strcpy(thread_id_ch, MAIN_THREAD_PREFIX);\
                 printf("main thread checkpoint started\n");\
             }\
             /*関数は移行先で再探索しよう． */\

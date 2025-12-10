@@ -26,5 +26,6 @@ int wasm_dump(WASMExecEnv *exec_env,
          bool done_flag,
          char *file_prefix);
 
+void str_add_prefix(char* file_name, char* file_prefix);
 
 #endif // _WASM_CHECKPOINT_H

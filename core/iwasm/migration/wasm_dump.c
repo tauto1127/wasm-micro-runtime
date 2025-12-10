@@ -6,6 +6,7 @@
 #include "wasm_migration.h"
 #include "wasm_dump.h"
 #include "wasm_dispatch.h"
+#include "wasm_checkpoint.h"
 
 #define BH_PLATFORM_LINUX 0
 #if WASM_ENABLE_FAST_INTERP == 0
@@ -285,21 +286,22 @@ _dump_stack(WASMExecEnv *exec_env, struct WASMInterpFrame *frame, FILE *fp, bool
 
 
 int
-wasm_dump_stack(WASMExecEnv *exec_env, struct WASMInterpFrame *frame)
+wasm_dump_stack(WASMExecEnv *exec_env, struct WASMInterpFrame *frame, char* file_prefix)
 {
     WASMModuleInstance *module =
         (WASMModuleInstance *)exec_env->module_inst;
 
     // frameをtopからbottomまで走査する
-    char file[32];
+    char file_name[MAX_FILE_NAME_LENGTH] = "";
     int i = 0;
     do {
         // dummy framenならbreak
         if (frame->function == NULL) break;
 
         ++i;
-        sprintf(file, "stack%d.img", i);
-        FILE *fp = open_image(file, "wb");
+        sprintf(file_name, "stack%d.img", i);
+        str_add_prefix(file_name, file_prefix);
+        FILE *fp = open_image(file_name, "wb");
 
         uint32 entry_fidx = frame->function - module->e->functions;
         fwrite(&entry_fidx, sizeof(uint32), 1, fp);
@@ -308,8 +310,10 @@ wasm_dump_stack(WASMExecEnv *exec_env, struct WASMInterpFrame *frame)
         fclose(fp);
     } while((frame = frame->prev_frame));
 
+    char frame_count_file_name[MAX_FILE_NAME_LENGTH] = "frame_count.img";
+    str_add_prefix(frame_count_file_name, file_prefix);
     // frame stackのサイズを保存
-    FILE *fp = open_image("frame.img", "wb");
+    FILE *fp = open_image(frame_count_file_name, "wb");
     fwrite(&i, sizeof(uint32), 1, fp);
     fclose(fp);
 
@@ -375,9 +379,11 @@ int check_soft_dirty(int fd, uint8* addr) {
 #endif
 }
 
-int dump_dirty_memory(WASMMemoryInstance *memory) {
+int dump_dirty_memory(WASMMemoryInstance *memory, char* file_prefix) {
     const int PAGE_SIZE = 4096;
-    FILE *memory_fp = open_image("memory.img", "wb");
+    char file_name[MAX_FILE_NAME_LENGTH] = "memory.img";
+    str_add_prefix(file_name, file_prefix);
+    FILE *memory_fp = open_image(file_name, "wb");
     uint64 pagemap_entry;
 
 #if BH_PLATFORM_LINUX == 1
@@ -406,12 +412,24 @@ int dump_dirty_memory(WASMMemoryInstance *memory) {
     return 0;
 }
 
+void str_add_prefix(char* file_name, char* file_prefix) {
+    size_t len = strlen(file_name) + strlen(file_prefix) + 1;
+    char* buf = malloc(len);
+    if (!buf) return;
+
+    strcpy(buf, file_prefix);
+    strcat(buf, file_name);
+    strcpy(file_name, buf);
+}
+
 int wasm_dump_memory(WASMMemoryInstance *memory, char* file_prefix) {
-    char* file_name = "mem_page_count.img";
-    strcat(file_prefix, file_name);
+    if(strcmp(file_prefix, MAIN_THREAD_PREFIX) != 0)  return 0;
+    char file_name[MAX_FILE_NAME_LENGTH] = "mem_page_count.img";
+    str_add_prefix(file_name, file_prefix);
+    printf("file_prefix: %s\n", file_prefix);
     FILE *mem_size_fp = open_image(file_name, "wb");
 
-    dump_dirty_memory(memory);
+    dump_dirty_memory(memory, file_prefix);
 
 
     printf("page_count: %d\n", memory->cur_page_count);
@@ -427,12 +445,14 @@ int wasm_dump_memory(WASMMemoryInstance *memory, char* file_prefix) {
     return 0;
 }
 
-int wasm_dump_global(WASMModuleInstance *module, WASMGlobalInstance *globals, uint8* global_data) {
+int wasm_dump_global(WASMModuleInstance *module, WASMGlobalInstance *globals, uint8* global_data, char* file_prefix) {
     FILE *fp;
-    const char *file = "global.img";
-    fp = open_image(file, "wb");
+    char file_name[MAX_FILE_NAME_LENGTH] = "global.img";
+    str_add_prefix(file_name, file_prefix);
+    printf("wasm_dump_global: %s\n", file_name);
+    fp = open_image(file_name, "wb");
     if (fp == NULL) {
-        fprintf(stderr, "failed to open %s\n", file);
+        fprintf(stderr, "failed to open %s\n", file_name);
         return -1;
     }
 
@@ -463,11 +483,13 @@ int wasm_dump_global(WASMModuleInstance *module, WASMGlobalInstance *globals, ui
 int wasm_dump_program_counter(
     WASMModuleInstance *module,
     WASMFunctionInstance *func,
-    uint8 *frame_ip
+    uint8 *frame_ip,
+    char* file_prefix
 )
 {
     FILE *fp;
-    const char *file = "program_counter.img";
+    char file[MAX_FILE_NAME_LENGTH] = "program_counter.img";
+    str_add_prefix(file, file_prefix);
     fp = open_image(file, "wb");
     if (fp == NULL) {
         fprintf(stderr, "failed to open %s\n", file);
@@ -509,7 +531,7 @@ int wasm_dump(WASMExecEnv *exec_env,
     clock_gettime(CLOCK_MONOTONIC, &ts1);
     rc = wasm_dump_memory(memory, file_prefix);
     clock_gettime(CLOCK_MONOTONIC, &ts2);
-    fprintf(stderr, "memory, %lu\n", get_time(ts1, ts2));
+    fprintf(stderr, "%s: memory, %lu\n", file_prefix, get_time(ts1, ts2));
     if (rc < 0) {
         LOG_ERROR("Failed to dump linear memory\n");
         return rc;
@@ -517,7 +539,7 @@ int wasm_dump(WASMExecEnv *exec_env,
 
     // dump globals
     clock_gettime(CLOCK_MONOTONIC, &ts1);
-    rc = wasm_dump_global(module, globals, global_data);
+    rc = wasm_dump_global(module, globals, global_data, file_prefix);
     clock_gettime(CLOCK_MONOTONIC, &ts2);
     fprintf(stderr, "global, %lu\n", get_time(ts1, ts2));
     if (rc < 0) {
@@ -527,7 +549,7 @@ int wasm_dump(WASMExecEnv *exec_env,
 
     // dump program counter
     clock_gettime(CLOCK_MONOTONIC, &ts1);
-    rc = wasm_dump_program_counter(module, cur_func, frame_ip);
+    rc = wasm_dump_program_counter(module, cur_func, frame_ip, file_prefix);
     clock_gettime(CLOCK_MONOTONIC, &ts2);
     fprintf(stderr, "program counter, %lu\n", get_time(ts1, ts2));
     if (rc < 0) {
@@ -537,7 +559,7 @@ int wasm_dump(WASMExecEnv *exec_env,
 
     // dump stack
     clock_gettime(CLOCK_MONOTONIC, &ts1);
-    rc = wasm_dump_stack(exec_env, frame);
+    rc = wasm_dump_stack(exec_env, frame, file_prefix);
     clock_gettime(CLOCK_MONOTONIC, &ts2);
     fprintf(stderr, "stack, %lu\n", get_time(ts1, ts2));
     if (rc < 0) {
