@@ -22,7 +22,6 @@ endif ()
 file (GLOB_RECURSE source_all
     ${IWASM_INTERP_DIR}/${LOADER}
     ${IWASM_INTERP_DIR}/wasm_runtime.c
-    ${IWASM_INTERP_DIR}/wasm_checkpoint.c
     ${IWASM_INTERP_DIR}/${INTERPRETER}
 )
 

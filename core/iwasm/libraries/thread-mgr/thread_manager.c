@@ -1011,7 +1011,7 @@ wasm_cluster_increase_checkpointing_counter(WASMCluster *cluster)
 
     os_mutex_lock(&counter->lock);
     counter->checkpointing_count++;
-    printf("wasm_cluster_increase_checkpointing_counter: %d\n", counter->checkpointing_count);
+
     os_cond_signal(&counter->cond);
     os_mutex_unlock(&counter->lock);
 }

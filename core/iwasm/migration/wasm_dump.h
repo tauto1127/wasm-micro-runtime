@@ -29,3 +29,10 @@ int wasm_dump(WASMExecEnv *exec_env,
 void str_add_prefix(char* file_name, char* file_prefix);
 
 #endif // _WASM_CHECKPOINT_H
+
+void* signal_control_routine(void *arg);
+
+#if WASM_ENABLE_CR != 0
+#define MAIN_THREAD_PREFIX "main-"
+#define MAX_FILE_NAME_LENGTH 100
+#endif

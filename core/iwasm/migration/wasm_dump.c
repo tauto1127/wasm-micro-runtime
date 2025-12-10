@@ -2,11 +2,14 @@
 #include <stdlib.h>
 #include <time.h>
 
+#include "platform_api_extension.h"
+#include "platform_api_vmcore.h"
+#include "platform_common.h"
+#include "thread_manager.h"
 #include "../interpreter/wasm_runtime.h"
 #include "wasm_migration.h"
 #include "wasm_dump.h"
 #include "wasm_dispatch.h"
-#include "wasm_checkpoint.h"
 #include "lib_wasi_threads_wrapper.h"
 
 #define BH_PLATFORM_LINUX 0
@@ -427,13 +430,12 @@ int wasm_dump_memory(WASMMemoryInstance *memory, char* file_prefix) {
     if(strcmp(file_prefix, MAIN_THREAD_PREFIX) != 0)  return 0;
     char file_name[MAX_FILE_NAME_LENGTH] = "mem_page_count.img";
     str_add_prefix(file_name, file_prefix);
-    printf("file_prefix: %s\n", file_prefix);
     FILE *mem_size_fp = open_image(file_name, "wb");
 
     dump_dirty_memory(memory, file_prefix);
 
 
-    printf("page_count: %d\n", memory->cur_page_count);
+    printf("%spage_count: %d\n", file_prefix, memory->cur_page_count);
     fwrite(&(memory->cur_page_count), sizeof(uint32), 1, mem_size_fp);
 
     fclose(mem_size_fp);
@@ -450,7 +452,6 @@ int wasm_dump_global(WASMModuleInstance *module, WASMGlobalInstance *globals, ui
     FILE *fp;
     char file_name[MAX_FILE_NAME_LENGTH] = "global.img";
     str_add_prefix(file_name, file_prefix);
-    printf("wasm_dump_global: %s\n", file_name);
     fp = open_image(file_name, "wb");
     if (fp == NULL) {
         fprintf(stderr, "failed to open %s\n", file_name);
@@ -555,7 +556,7 @@ int wasm_dump(WASMExecEnv *exec_env,
     clock_gettime(CLOCK_MONOTONIC, &ts1);
     rc = wasm_dump_memory(memory, file_prefix);
     clock_gettime(CLOCK_MONOTONIC, &ts2);
-    fprintf(stderr, "%s: memory, %lu\n", file_prefix, get_time(ts1, ts2));
+    fprintf(stderr, "%smemory, %lu\n", file_prefix, get_time(ts1, ts2));
     if (rc < 0) {
         LOG_ERROR("Failed to dump linear memory\n");
         return rc;
@@ -565,7 +566,7 @@ int wasm_dump(WASMExecEnv *exec_env,
     clock_gettime(CLOCK_MONOTONIC, &ts1);
     rc = wasm_dump_global(module, globals, global_data, file_prefix);
     clock_gettime(CLOCK_MONOTONIC, &ts2);
-    fprintf(stderr, "global, %lu\n", get_time(ts1, ts2));
+    fprintf(stderr, "%sglobal, %lu\n", file_prefix, get_time(ts1, ts2));
     if (rc < 0) {
         LOG_ERROR("Failed to dump globals\n");
         return rc;
@@ -575,7 +576,7 @@ int wasm_dump(WASMExecEnv *exec_env,
     clock_gettime(CLOCK_MONOTONIC, &ts1);
     rc = wasm_dump_program_counter(module, cur_func, frame_ip, file_prefix);
     clock_gettime(CLOCK_MONOTONIC, &ts2);
-    fprintf(stderr, "program counter, %lu\n", get_time(ts1, ts2));
+    fprintf(stderr, "%sprogram counter, %lu\n", file_prefix, get_time(ts1, ts2));
     if (rc < 0) {
         LOG_ERROR("Failed to dump program_counter\n");
         return rc;
@@ -585,7 +586,7 @@ int wasm_dump(WASMExecEnv *exec_env,
     clock_gettime(CLOCK_MONOTONIC, &ts1);
     rc = wasm_dump_stack(exec_env, frame, file_prefix);
     clock_gettime(CLOCK_MONOTONIC, &ts2);
-    fprintf(stderr, "stack, %lu\n", get_time(ts1, ts2));
+    fprintf(stderr, "%sstack, %lu\n", file_prefix, get_time(ts1, ts2));
     if (rc < 0) {
         LOG_ERROR("Failed to dump frame\n");
         return rc;
@@ -595,7 +596,7 @@ int wasm_dump(WASMExecEnv *exec_env,
     clock_gettime(CLOCK_MONOTONIC, &ts1);
     rc = wasm_dump_thread_attrs(exec_env, file_prefix);
     clock_gettime(CLOCK_MONOTONIC, &ts2);
-    fprintf(stderr, "thread attrs, %lu\n", get_time(ts1, ts2));
+    fprintf(stderr, "%sthread attrs, %lu\n", file_prefix, get_time(ts1, ts2));
     if (rc < 0) {
         LOG_ERROR("Failed to dump thread attrs\n");
         return rc;
@@ -621,3 +622,95 @@ bool wasm_get_checkpoint() {
     return sig_flag;
 }
 #endif // WASM_ENABLE_FAST_INTERP
+
+// checkpoint for thread routine
+void *
+signal_control_routine(void *arg)
+{
+    // チェックポイント用スレッドの処理
+    WASMCluster *cluster = (WASMCluster *)arg;
+    sigset_t set;
+    int sig;
+
+    sigemptyset(&set);
+    sigaddset(&set, SIGUSR1);
+    sigaddset(&set, SIGUSR2);
+
+    while (true) {
+        if (sigwait(&set, &sig) != 0) {
+            continue;
+        }
+        // チェックポイントシグナルが届いた時
+        if (sig == SIGUSR2) {
+            int waits = wasm_cluster_get_waiting_thread_count(cluster);
+            int counts = wasm_cluster_get_thread_count(cluster);
+
+            struct AtomicCounter* counter = wasm_cluster_init_checkpointing_counter(cluster,0);
+
+            printf("=======スレッドの同時停止開始=========\n");
+            printf("トータルスレッド数：%d, 待機中スレッド数：%d\n", counts, waits);
+            // 停止シグナル
+            wasm_cluster_send_signal_all(cluster, WAMR_SIG_CHECKPOINT);
+            // wasm_cluster_send_signal_all(cluster, WAMR_SIG_CHECKPOINT);
+            os_mutex_lock(&counter->lock);
+            for(;;) {
+                waits = wasm_cluster_get_waiting_thread_count(cluster);
+                counts = wasm_cluster_get_thread_count(cluster);
+
+                if (counter->checkpointing_count + waits == counts) {
+                    os_mutex_unlock(&counter->lock);
+                    break;
+                }
+
+                os_cond_wait(&counter->cond, &counter->lock);
+                // if (counter->checkpointing_count == 0) {
+                //     os_mutex_unlock(&counter->lock);
+                //     printf("all normal threads wake up!!\n");
+                //     break;
+                // }
+            };
+            os_mutex_unlock(&counter->lock);
+            printf("======waiting threadを起こします=========\n");
+
+            // =====スレッド同時停止======
+            wasm_cluster_wake_up_threads(cluster);
+            os_mutex_lock(&counter->lock);
+            for(;;) {
+                counts = wasm_cluster_get_thread_count(cluster);
+                if (counter->checkpointing_count == counts) {
+                    os_mutex_unlock(&counter->lock);
+                    printf("all waiting threads wake up!! checkpointing count: %d\n", counter->checkpointing_count);
+                    break;
+                }
+                os_cond_wait(&counter->cond, &counter->lock);
+            };
+
+            // ========チェックポイント開始========
+            printf("======start checkpoint========\n");
+            counter = wasm_cluster_init_checkpointing_counter(cluster, 0);
+            wasm_cluster_thread_continue_all(cluster);
+
+            // やっぱちゃんとカウントしないと，全部終わったか分からんな
+            os_mutex_lock(&counter->lock);
+            for(;;) {
+                if(counter->checkpointing_count != 0) printf("チェックポイント済み：%d\n", counter->checkpointing_count);
+                counts = wasm_cluster_get_thread_count(cluster);
+                if (counter->checkpointing_count == counts) {
+                    printf("========all waiting threads check pointed!! count: %d===========\n", counter->checkpointing_count);
+                    os_mutex_unlock(&counter->lock);
+                    break;
+                }
+                os_cond_wait(&counter->cond, &counter->lock);
+            };
+
+            exit(0);
+            // wasm_cluster_reset_checkpointing_counter(cluster);
+        }
+        else if (sig == SIGUSR1) {
+            printf("SIGUSR1 called, %ld", pthread_self());
+            wasm_cluster_thread_continue_all(cluster);
+        }
+    }
+
+    return NULL;
+}

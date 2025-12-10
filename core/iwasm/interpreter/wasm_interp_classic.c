@@ -13,7 +13,6 @@
 #include "wasm_opcode.h"
 #include "wasm_loader.h"
 #include "wasm_memory.h"
-#include "wasm_checkpoint.h"
 #include "thread_manager.h"
 #include "lib_wasi_threads_wrapper.h"
 #include "../common/wasm_exec_env.h"
@@ -1359,6 +1358,49 @@ wasm_interp_call_func_import(WASMModuleInstance *module_inst,
 }
 #endif
 
+#if WASM_ENABLE_CR != 0
+#define MAIN_THREAD_PREFIX "main-"
+#define CHECKPOINT_THREADS() \
+    SYNC_ALL_TO_FRAME();                                           \
+    wasm_cluster_increase_checkpointing_counter(exec_env->cluster); \
+    wasm_cluster_thread_waiting_run(exec_env);                 \
+    /* 100文字まで？？*/\
+    char* thread_id_ch = wasm_runtime_malloc(sizeof(char) * 100); \
+    ThreadStartArg *thread_arg = (ThreadStartArg *)exec_env->thread_arg;\
+    uint32 arg;\
+    if(exec_env->thread_arg != NULL) {\
+        arg = thread_arg->arg; \
+        int32 thread_id = thread_arg->thread_id;\
+        sprintf(thread_id_ch, "%d-", thread_id); \
+        printf("%sThread checkpoint started\n", thread_id_ch);\
+    }else { \
+        strcpy(thread_id_ch, MAIN_THREAD_PREFIX);\
+        printf("%sThread %s checkpoint started\n", thread_id_ch);\
+    }\
+    /*関数は移行先で再探索しよう． */\
+    /* wasm_runtime_lookup_function(new_module_inst, THREAD_START_FUNCTION);*/\
+    /*wasm_function_inst_t* func = thread_arg->func;*/\
+    /*os_mutex_unlock(&exec_env->wait_lock);\*/\
+    SYNC_ALL_TO_FRAME(); \
+    uint8 *dummy_ip;                                                    \
+    uint32 *dummy_sp;                                                   \
+    dummy_ip = frame_ip;                                                \
+    dummy_sp = frame_sp;                                                \
+    int rc = wasm_dump(exec_env, module, memory,                        \
+        globals, global_data, global_addr, cur_func,                    \
+        frame, dummy_ip, dummy_sp, frame_csp,                           \
+        frame_ip_end, else_addr, end_addr, maddr, done_flag, thread_id_ch);           \
+    if (rc < 0) {                                                       \
+        perror("failed to dump\n");                                     \
+        exit(1);                                                        \
+    }                                                                   \
+    printf("%sdispatch_count: %d\n", thread_id_ch, dispatch_count);                  \
+    wasm_cluster_increase_checkpointing_counter(exec_env->cluster);\
+    printf("%sThread checkpointed\n", thread_id_ch);\
+    wasm_cluster_thread_send_signal(exec_env, WAMR_SIG_CHECKPOINT);\
+    wasm_cluster_thread_waiting_run(exec_env);
+#endif
+
 #if WASM_ENABLE_THREAD_MGR != 0
 #if WASM_ENABLE_DEBUG_INTERP != 0
 #if WASM_ENABLE_CR != 0
@@ -1366,11 +1408,7 @@ wasm_interp_call_func_import(WASMModuleInstance *module_inst,
     do {                                                               \
     os_mutex_lock(&exec_env->wait_lock);                           \
         if (IS_WAMR_CHECKPOINT_SIG(exec_env->current_status->signal_flag)) {\
-            printf("CHECKPOINT_SIG\n");\
-            SYNC_ALL_TO_FRAME();                                           \
-            wasm_cluster_increase_checkpointing_counter(exec_env->cluster); \
-            wasm_cluster_thread_checkpoint_ready(exec_env); \
-            os_mutex_unlock(&exec_env->wait_lock);\
+            CHECKPOINT_THREADS();\
         }\
         if (IS_WAMR_TERM_SIG(exec_env->current_status->signal_flag)) { \
             printf("CHECK_SUSPEND_FLAGS WAMR_TERM_SIG\n");                          \
@@ -1418,60 +1456,7 @@ wasm_interp_call_func_import(WASMModuleInstance *module_inst,
     do {                                                              \
         WASM_SUSPEND_FLAGS_LOCK(exec_env->wait_lock);                 \
         if (IS_WAMR_CHECKPOINT_SIG(exec_env->current_status->signal_flag)) {\
-            if(exec_env->thread_arg != NULL) {\
-                printf("CHECKPOINT_SIG\n");\
-            }else{ \
-                printf("MAIN THREAD CHECKPOINT_SIG\n");\
-            }\
-            SYNC_ALL_TO_FRAME();                                           \
-            wasm_cluster_increase_checkpointing_counter(exec_env->cluster); \
-            wasm_cluster_thread_waiting_run(exec_env);                 \
-            /* 100文字まで？？*/\
-            char* thread_id_ch = wasm_runtime_malloc(sizeof(char) * 100); \
-            ThreadStartArg *thread_arg = (ThreadStartArg *)exec_env->thread_arg;\
-            uint32 arg;\
-            if(exec_env->thread_arg != NULL) {\
-                arg = thread_arg->arg; \
-                int32 thread_id = thread_arg->thread_id;\
-                sprintf(thread_id_ch, "%d-", thread_id); \
-                printf("thread %d checkpoint started\n", thread_id);\
-            }else { \
-                strcpy(thread_id_ch, MAIN_THREAD_PREFIX);\
-                printf("main thread checkpoint started\n");\
-            }\
-            /*関数は移行先で再探索しよう． */\
-            /* =============チェッックポイント=========== */\
-            /*ここでチェックポイントする */\
-            /* wasm_runtime_lookup_function(new_module_inst, THREAD_START_FUNCTION);*/\
-            /*wasm_function_inst_t* func = thread_arg->func;*/\
-            /*os_mutex_unlock(&exec_env->wait_lock);\*/\
-            if (exec_env->thread_arg != NULL) { \
-                printf("START Thread %s checkpoint\n", thread_id_ch);\
-            } else { \
-                printf("START Main thread checkpoint\n");\
-            }\
-            SYNC_ALL_TO_FRAME(); \
-            uint8 *dummy_ip;                                                    \
-            uint32 *dummy_sp;                                                   \
-            dummy_ip = frame_ip;                                                \
-            dummy_sp = frame_sp;                                                \
-            int rc = wasm_dump(exec_env, module, memory,                        \
-                globals, global_data, global_addr, cur_func,                    \
-                frame, dummy_ip, dummy_sp, frame_csp,                           \
-                frame_ip_end, else_addr, end_addr, maddr, done_flag, thread_id_ch);           \
-            if (rc < 0) {                                                       \
-                perror("failed to dump\n");                                     \
-                exit(1);                                                        \
-            }                                                                   \
-            printf("dispatch_count: %d\n", dispatch_count);                  \
-            wasm_cluster_increase_checkpointing_counter(exec_env->cluster);\
-            if (exec_env->thread_arg != NULL) { \
-                printf("Thread %s checkpointed\n", thread_id_ch);\
-            } else { \
-                printf("Main thread checkpointed\n");\
-            }\
-            wasm_cluster_thread_send_signal(exec_env, WAMR_SIG_CHECKPOINT);\
-            wasm_cluster_thread_waiting_run(exec_env);\
+            CHECKPOINT_THREADS();\
         }\
         if (WASM_SUSPEND_FLAGS_GET(exec_env->suspend_flags)           \
             & WASM_SUSPEND_FLAG_TERMINATE) {                          \
