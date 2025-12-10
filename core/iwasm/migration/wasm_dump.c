@@ -7,6 +7,7 @@
 #include "wasm_dump.h"
 #include "wasm_dispatch.h"
 #include "wasm_checkpoint.h"
+#include "lib_wasi_threads_wrapper.h"
 
 #define BH_PLATFORM_LINUX 0
 #if WASM_ENABLE_FAST_INTERP == 0
@@ -488,11 +489,11 @@ int wasm_dump_program_counter(
 )
 {
     FILE *fp;
-    char file[MAX_FILE_NAME_LENGTH] = "program_counter.img";
-    str_add_prefix(file, file_prefix);
-    fp = open_image(file, "wb");
+    char file_name[MAX_FILE_NAME_LENGTH] = "program_counter.img";
+    str_add_prefix(file_name, file_prefix);
+    fp = open_image(file_name, "wb");
     if (fp == NULL) {
-        fprintf(stderr, "failed to open %s\n", file);
+        fprintf(stderr, "failed to open %s\n", file_name);
         return -1;
     }
 
@@ -502,6 +503,29 @@ int wasm_dump_program_counter(
 
     dump_value(&fidx, sizeof(uint32), 1, fp);
     dump_value(&p_offset, sizeof(uint32), 1, fp);
+
+    return 0;
+}
+
+// thread_id, スレッドの開始関数の引数をdump
+int wasm_dump_thread_attrs(WASMExecEnv *exec_env, char* file_prefix) {
+    ThreadStartArg *thread_arg = (ThreadStartArg *)exec_env->thread_arg;
+
+    if (thread_arg == NULL) return 0;
+
+    FILE *fp;
+    char file_name[MAX_FILE_NAME_LENGTH] = "thread_addr.img";
+    str_add_prefix(file_name, file_prefix);
+    fp = open_image(file_name, "wb");
+    if (fp == NULL) {
+        fprintf(stderr, "failed to open %s\n", file_name);
+        return -1;
+    }
+
+    int32 thread_id = thread_arg->thread_id;
+    uint32 arg = thread_arg->arg;
+    dump_value(&thread_id, sizeof(int32), 1, fp);
+    dump_value(&arg, sizeof(uint32), 1, fp);
 
     return 0;
 }
@@ -564,6 +588,16 @@ int wasm_dump(WASMExecEnv *exec_env,
     fprintf(stderr, "stack, %lu\n", get_time(ts1, ts2));
     if (rc < 0) {
         LOG_ERROR("Failed to dump frame\n");
+        return rc;
+    }
+
+    // dump threaed attrs if needed
+    clock_gettime(CLOCK_MONOTONIC, &ts1);
+    rc = wasm_dump_thread_attrs(exec_env, file_prefix);
+    clock_gettime(CLOCK_MONOTONIC, &ts2);
+    fprintf(stderr, "thread attrs, %lu\n", get_time(ts1, ts2));
+    if (rc < 0) {
+        LOG_ERROR("Failed to dump thread attrs\n");
         return rc;
     }
 
