@@ -70,7 +70,7 @@ int dump_value(void *ptr, size_t size, size_t nmemb, FILE *stream) {
 int debug_memories(WASMModuleInstance *module) {
     printf("=== debug memories ===\n");
     printf("memory_count: %d\n", module->memory_count);
-    
+
     // bytes_per_page
     for (int i = 0; i < module->memory_count; i++) {
         WASMMemoryInstance *memory = (WASMMemoryInstance *)(module->memories[i]);
@@ -110,7 +110,7 @@ int debug_function_opcodes(WASMModuleInstance *module, WASMFunctionInstance* fun
     fprintf(fp, "fidx: %ld\n", func - module->e->functions);
     uint8 *ip = wasm_get_func_code(func);
     uint8 *ip_end = wasm_get_func_code_end(func);
-    
+
     for (int i = 0; i < (int)limit; i++) {
         fprintf(fp, "%d) opcode: 0x%x\n", i+1, *ip);
         ip = dispatch(ip, ip_end);
@@ -150,7 +150,7 @@ uint8* get_type_stack(uint32 fidx, uint32 offset, uint32* type_stack_size, bool 
     if (!tablemap_func) printf("not found tablemap_offset\n");
     FILE *type_table = open_image("type_table", "rb");
     if (!tablemap_func) printf("not found type_table\n");
-    
+
     /// tablemap_func
     fseek(tablemap_func, fidx*sizeof(uint32)*3, SEEK_SET);
     uint32 ffidx;
@@ -173,8 +173,8 @@ uint8* get_type_stack(uint32 fidx, uint32 offset, uint32* type_stack_size, bool 
     uint32 ooffset;
     uint64 type_table_addr, pre_type_table_addr;
     while(!feof(tablemap_offset)) {
-       fread(&ooffset, sizeof(uint32), 1, tablemap_offset); 
-       fread(&type_table_addr, sizeof(uint64), 1, tablemap_offset); 
+       fread(&ooffset, sizeof(uint32), 1, tablemap_offset);
+       fread(&type_table_addr, sizeof(uint64), 1, tablemap_offset);
        if (offset == ooffset) break;
        pre_type_table_addr = type_table_addr;
     }
@@ -274,7 +274,7 @@ _dump_stack(WASMExecEnv *exec_env, struct WASMInterpFrame *frame, FILE *fp, bool
         // uint32 *frame_tsp;
         // addr = get_addr_offset(csp->frame_tsp, frame->tsp_bottom);
         // fwrite(&addr, sizeof(uint32), 1, fp);
-        
+
         // uint32 cell_num;
         fwrite(&csp->cell_num, sizeof(uint32), 1, fp);
 
@@ -383,7 +383,7 @@ int dump_dirty_memory(WASMMemoryInstance *memory) {
 #if BH_PLATFORM_LINUX == 1
     int fd = get_pagemap(memory->memory_data);
 #else
-    // check_soft_dirtyでfdを使っているのでダミー用. 
+    // check_soft_dirtyでfdを使っているのでダミー用.
     // もっといい実装がありそう
     int fd = 0;
 #endif
@@ -406,8 +406,10 @@ int dump_dirty_memory(WASMMemoryInstance *memory) {
     return 0;
 }
 
-int wasm_dump_memory(WASMMemoryInstance *memory) {
-    FILE *mem_size_fp = open_image("mem_page_count.img", "wb");
+int wasm_dump_memory(WASMMemoryInstance *memory, char* file_prefix) {
+    char* file_name = "mem_page_count.img";
+    strcat(file_prefix, file_name);
+    FILE *mem_size_fp = open_image(file_name, "wb");
 
     dump_dirty_memory(memory);
 
@@ -498,13 +500,14 @@ int wasm_dump(WASMExecEnv *exec_env,
          uint8 *else_addr,
          uint8 *end_addr,
          uint8 *maddr,
-         bool done_flag)
+         bool done_flag,
+         char* file_prefix)
 {
     int rc;
     struct timespec ts1, ts2;
     // dump linear memory
     clock_gettime(CLOCK_MONOTONIC, &ts1);
-    rc = wasm_dump_memory(memory);
+    rc = wasm_dump_memory(memory, file_prefix);
     clock_gettime(CLOCK_MONOTONIC, &ts2);
     fprintf(stderr, "memory, %lu\n", get_time(ts1, ts2));
     if (rc < 0) {
@@ -552,12 +555,12 @@ static bool sig_flag = false;
 //     wasm_set_checkpoint(true);
 // }
 
-inline 
+inline
 void wasm_set_checkpoint(bool f) {
     sig_flag = f;
 }
 
-inline 
+inline
 bool wasm_get_checkpoint() {
     return sig_flag;
 }

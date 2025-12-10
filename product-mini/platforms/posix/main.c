@@ -576,7 +576,7 @@ main(int argc, char *argv[])
     // fprintf(stderr, "boot_start, %lu\n", (uint64_t)(ts1.tv_sec*1e9) + ts1.tv_nsec);
 
     // signal handler for checkpoint
-    signal(SIGINT, &wasm_interp_sigint);
+    // signal(SIGINT, &wasm_interp_sigint);
 
     int32 ret = -1;
     char *wasm_file = NULL;

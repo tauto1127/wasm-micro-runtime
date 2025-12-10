@@ -6,6 +6,7 @@
 #include "platform_api_extension.h"
 #include "platform_api_vmcore.h"
 #include <time.h>
+#include "platform_common.h"
 #include "wasm_interp.h"
 #include "bh_log.h"
 #include "wasm_runtime.h"
@@ -1417,17 +1418,26 @@ wasm_interp_call_func_import(WASMModuleInstance *module_inst,
     do {                                                              \
         WASM_SUSPEND_FLAGS_LOCK(exec_env->wait_lock);                 \
         if (IS_WAMR_CHECKPOINT_SIG(exec_env->current_status->signal_flag)) {\
-            printf("CHECKPOINT_SIG\n");\
+            if(exec_env->thread_arg != NULL) {\
+                printf("CHECKPOINT_SIG\n");\
+            }else{ \
+                printf("MAIN THREAD CHECKPOINT_SIG\n");\
+            }\
             SYNC_ALL_TO_FRAME();                                           \
             wasm_cluster_increase_checkpointing_counter(exec_env->cluster); \
             wasm_cluster_thread_waiting_run(exec_env);                 \
+            /* 100文字まで？？*/\
+            char* thread_id_ch = wasm_runtime_malloc(sizeof(char) * 100); \
+            ThreadStartArg *thread_arg = (ThreadStartArg *)exec_env->thread_arg;\
+            uint32 arg;\
             if(exec_env->thread_arg != NULL) {\
-                ThreadStartArg *thread_arg = (ThreadStartArg *)exec_env->thread_arg;\
+                arg = thread_arg->arg; \
                 int32 thread_id = thread_arg->thread_id;\
-                uint32 arg = thread_arg->arg;\
-                printf("Thread %u checkpointed\n", thread_id);\
-            }else {\
-                printf("Main thread checkpointed\n");\
+                sprintf(thread_id_ch, "%d", thread_id); \
+                printf("thread %d checkpoint started\n", thread_id);\
+            }else { \
+                strcpy(thread_id_ch, "main");\
+                printf("main thread checkpoint started\n");\
             }\
             /*関数は移行先で再探索しよう． */\
             /* =============チェッックポイント=========== */\
@@ -1435,7 +1445,31 @@ wasm_interp_call_func_import(WASMModuleInstance *module_inst,
             /* wasm_runtime_lookup_function(new_module_inst, THREAD_START_FUNCTION);*/\
             /*wasm_function_inst_t* func = thread_arg->func;*/\
             /*os_mutex_unlock(&exec_env->wait_lock);\*/\
+            if (exec_env->thread_arg != NULL) { \
+                printf("START Thread %s checkpoint\n", thread_id_ch);\
+            } else { \
+                printf("START Main thread checkpoint\n");\
+            }\
+            SYNC_ALL_TO_FRAME(); \
+            uint8 *dummy_ip;                                                    \
+            uint32 *dummy_sp;                                                   \
+            dummy_ip = frame_ip;                                                \
+            dummy_sp = frame_sp;                                                \
+            int rc = wasm_dump(exec_env, module, memory,                        \
+                globals, global_data, global_addr, cur_func,                    \
+                frame, dummy_ip, dummy_sp, frame_csp,                           \
+                frame_ip_end, else_addr, end_addr, maddr, done_flag, thread_id_ch);           \
+            if (rc < 0) {                                                       \
+                perror("failed to dump\n");                                     \
+                exit(1);                                                        \
+            }                                                                   \
+            printf("dispatch_count: %d\n", dispatch_count);                  \
             wasm_cluster_increase_checkpointing_counter(exec_env->cluster);\
+            if (exec_env->thread_arg != NULL) { \
+                printf("Thread %s checkpointed\n", thread_id_ch);\
+            } else { \
+                printf("Main thread checkpointed\n");\
+            }\
             wasm_cluster_thread_send_signal(exec_env, WAMR_SIG_CHECKPOINT);\
             wasm_cluster_thread_waiting_run(exec_env);\
         }\
@@ -1491,7 +1525,7 @@ wasm_interp_call_func_import(WASMModuleInstance *module_inst,
         int rc = wasm_dump(exec_env, module, memory,                        \
             globals, global_data, global_addr, cur_func,                    \
             frame, dummy_ip, dummy_sp, frame_csp,                           \
-            frame_ip_end, else_addr, end_addr, maddr, done_flag);           \
+            frame_ip_end, else_addr, end_addr, maddr, done_flag, '0');           \
         if (rc < 0) {                                                       \
             perror("failed to dump\n");                                     \
             exit(1);                                                        \

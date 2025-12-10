@@ -70,7 +70,7 @@ signal_control_routine(void *arg)
             };
 
             // ========チェックポイント開始========
-            printf("start checkpoint \n");
+            printf("======start checkpoint========\n");
             counter = wasm_cluster_init_checkpointing_counter(cluster, 0);
             wasm_cluster_thread_continue_all(cluster);
 
