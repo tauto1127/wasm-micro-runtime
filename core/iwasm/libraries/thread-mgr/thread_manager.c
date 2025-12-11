@@ -9,8 +9,10 @@
 #include "platform_api_vmcore.h"
 #include "platform_common.h"
 #include "wasm_exec_env.h"
+#include "wasm_export.h"
 #include <signal.h>
 #include <string.h>
+#include <lib_wasi_threads_wrapper.h>
 
 static void
 noop_usr_handler(int signo)
@@ -1036,6 +1038,30 @@ wasm_cluster_get_thread_count(WASMCluster *cluster)
     }
     os_mutex_unlock(&cluster->lock);
     return count;
+}
+
+// 使われてるスレッドidを配列で返す．最後は-1で終端
+int* wasm_cluster_get_thread_ids(WASMCluster *cluster) {
+    os_mutex_lock(&cluster->lock);
+    // 最大スレッドサイズの設定値を入れる
+    int *thread_ids = wasm_runtime_malloc(sizeof(int[100]));
+    WASMExecEnv *env = bh_list_first_elem(&cluster->exec_env_list);
+    int count = 0;
+    while(env) {
+        ThreadStartArg *arg = (ThreadStartArg *)env->thread_arg;
+        if(arg == NULL) {
+            env = bh_list_elem_next(env);
+            continue;
+        }
+        thread_ids[count] = arg->thread_id;
+
+        count++;
+        env = bh_list_elem_next(env);
+    }
+    thread_ids[count] = -1;
+    os_mutex_unlock(&cluster->lock);
+
+    return thread_ids;
 }
 
 int

@@ -5,6 +5,7 @@
 
 #include "platform_api_extension.h"
 #include "platform_api_vmcore.h"
+#include <string.h>
 #include <time.h>
 #include "platform_common.h"
 #include "wasm_interp.h"
@@ -1371,16 +1372,13 @@ wasm_interp_call_func_import(WASMModuleInstance *module_inst,
     if(exec_env->thread_arg != NULL) {\
         arg = thread_arg->arg; \
         int32 thread_id = thread_arg->thread_id;\
-        sprintf(thread_id_ch, "%d-", thread_id); \
+        thread_id_ch = get_file_prefix(thread_id);\
         printf("%sThread checkpoint started\n", thread_id_ch);\
     }else { \
-        strcpy(thread_id_ch, MAIN_THREAD_PREFIX);\
+        thread_id_ch = get_file_prefix(-1);\
         printf("%sThread %s checkpoint started\n", thread_id_ch);\
     }\
     /*関数は移行先で再探索しよう． */\
-    /* wasm_runtime_lookup_function(new_module_inst, THREAD_START_FUNCTION);*/\
-    /*wasm_function_inst_t* func = thread_arg->func;*/\
-    /*os_mutex_unlock(&exec_env->wait_lock);\*/\
     SYNC_ALL_TO_FRAME(); \
     uint8 *dummy_ip;                                                    \
     uint32 *dummy_sp;                                                   \
@@ -1762,6 +1760,25 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
     fprintf(stderr, "boot_end, %lu\n", (uint64_t)(ts1.tv_sec*1e9) + ts1.tv_nsec);
 
     if (get_restore_flag()) {
+        ThreadStartArg *thread_arg = (ThreadStartArg *)exec_env->thread_arg;
+        if (thread_arg == NULL) {
+            printf("メインスレッド\n");
+            // メイン
+            FILE* fp = open_image("thread_count", "rb");
+
+            int16 thread_count;
+            fread(&thread_count, sizeof(int16), 1, fp);
+
+            printf("=======Start restoring %d wasm VM\n", thread_count);
+            // 各wasm vmを復元
+            // メインスレッドは含まないので，thread_count - 1回復元
+            for (int i = 1; i < thread_count; i++) {
+            }
+            // wasm_restore_thread(exec_env, char *file_prefix)
+
+            exit(0);
+        }
+        printf("メインスレッドじゃない\n");
         // bool done_flag;
         int rc;
         struct timespec ts2;

@@ -31,6 +31,7 @@ void str_add_prefix(char* file_name, char* file_prefix);
 #endif // _WASM_CHECKPOINT_H
 
 void* signal_control_routine(void *arg);
+char* get_file_prefix(int32 thread_id);
 
 #if WASM_ENABLE_CR != 0
 #define MAIN_THREAD_PREFIX "main-"

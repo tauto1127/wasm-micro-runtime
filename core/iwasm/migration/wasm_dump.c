@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <time.h>
 
 #include "platform_api_extension.h"
@@ -512,14 +513,45 @@ int wasm_dump_program_counter(
 int wasm_dump_thread_states(WASMExecEnv *exec_env, char* file_prefix) {
     ThreadStartArg *thread_arg = (ThreadStartArg *)exec_env->thread_arg;
 
+    // main thread
     if (thread_arg == NULL) {
-        FILE *fp = open_image("thread_count.img", "wb");
+        printf("main thread dump_thread_states\n");
+        FILE *fp;
+        char file_name[MAX_FILE_NAME_LENGTH] = "thread_state.img";
+        str_add_prefix(file_name, file_prefix);
+        fp = open_image(file_name, "wb");
         if (fp == NULL) {
-            fprintf(stderr, "failed to open %s\n", "thread_count");
+            fprintf(stderr, "failed to open %s\n", file_name);
             return -1;
         }
+
         int16 thread_count = wasm_cluster_get_thread_count(exec_env->cluster);
         dump_value(&thread_count, sizeof(int16), 1, fp);
+        // // ここでfile_prefix一覧を保存する
+        // WASMExecEnv *exec_env_iter = wasm_cluster_get_first_exec_env(exec_env->cluster);
+        // wasm_cluster_traverse_lock(exec_env);
+        // char* str_to_dump = wasm_runtime_malloc(sizeof(char) * MAX_FILE_NAME_LENGTH);
+        // while (exec_env_iter) {
+        //     ThreadStartArg *arg = (ThreadStartArg *)exec_env_iter->thread_arg;
+        //     int32 tid = (arg == NULL) ? -1 : arg->thread_id;
+        //     char* prefix = get_file_prefix(tid);
+
+        //     if(count == 0) sprintf(str_to_dump, "%s", prefix);
+        //     else sprintf(str_to_dump, ",%s", prefix);
+        //     wasm_runtime_free(prefix);
+
+        //     exec_env_iter = exec_env_iter->next;
+        //     count++;
+        // }
+        int* ids = wasm_cluster_get_thread_ids(exec_env->cluster);
+        int count = 0;
+        for(int *p = ids; *p != -1; ++p) {
+            printf("thread id: %d\n", *p);
+            count++;
+        }
+
+        dump_value(ids, sizeof(int), count, fp);
+        wasm_runtime_free(ids);
 
         return 0;
     }
@@ -539,6 +571,16 @@ int wasm_dump_thread_states(WASMExecEnv *exec_env, char* file_prefix) {
     dump_value(&arg, sizeof(uint32), 1, fp);
 
     return 0;
+}
+// スレッドidから，ファイルprefixを生成．メインスレッドの場合は-1を入れる．
+char* get_file_prefix(int32 thread_id) {
+    if (thread_id == -1) {
+        return MAIN_THREAD_PREFIX;
+    } else {
+        char* prefix = wasm_runtime_malloc(sizeof(char) * MAX_FILE_NAME_LENGTH); \
+        sprintf(prefix, "%d-", thread_id);
+        return prefix;
+    }
 }
 
 int wasm_dump(WASMExecEnv *exec_env,

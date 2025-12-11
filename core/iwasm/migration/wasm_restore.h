@@ -3,6 +3,7 @@
 
 #include "../common/wasm_exec_env.h"
 #include "../interpreter/wasm_interp.h"
+#include "wasm_export.h"
 
 void set_restore_flag(bool f);
 bool get_restore_flag();
@@ -18,11 +19,12 @@ wasm_restore_stack(WASMExecEnv **exec_env);
 //         cnt++;
 //         if (frame->function == NULL)
 //             printf("frame: %d,          func idx: DUMMY\n", cnt);
-//         else 
+//         else
 //             printf("frame: %d          func idx: %d\n", cnt, frame->function-base_func_addr);
 //     } while(frame = frame->prev_frame);
 //     printf("===         dump frames         ===\n");
 // };
+int wasm_restore_thread(wasm_exec_env_t cur_exec_env, char* file_prefix);
 
 int wasm_restore(WASMModuleInstance **module,
             WASMExecEnv **exec_env,
