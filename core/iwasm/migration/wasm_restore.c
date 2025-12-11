@@ -13,6 +13,7 @@
 static bool restore_flag;
 void set_restore_flag(bool f)
 {
+    printf("restore flag set \n");
     restore_flag = f;
 }
 bool get_restore_flag()
@@ -309,7 +310,9 @@ int wasm_restore_thread_start_arg(ThreadStartArg* thread_start_arg, wasm_module_
     char file_name[MAX_FILE_NAME_LENGTH] = "thread_start_arg.img";
     str_add_prefix(file_name, file_prefix);
     FILE *fp = open_image(file_name, "rb");
+    printf("-==============================restore\n");
     fread(&thread_start_arg->thread_id, sizeof(int32), 1, fp);
+    printf("thread %d restore\n", thread_start_arg->thread_id);
     fread(&thread_start_arg->arg, sizeof(uint32), 1, fp);
 
     WASMFunctionInstanceCommon* start_func =
@@ -337,10 +340,10 @@ int wasm_restore_thread_start_arg(ThreadStartArg* thread_start_arg, wasm_module_
     /*os_mutex_unlock(&exec_env->wait_lock);\*/\
 }
 
-int wasm_restore_thread(wasm_exec_env_t cur_exec_env, char* file_prefix) {
+int wasm_restore_thread(wasm_exec_env_t parent_exec_env, char* file_prefix) {
     // モジュールインスタンスを作成する．
-    wasm_module_t module = wasm_exec_env_get_module(cur_exec_env);
-    wasm_module_inst_t module_inst = get_module_inst(cur_exec_env);
+    wasm_module_t module = wasm_exec_env_get_module(parent_exec_env);
+    wasm_module_inst_t module_inst = get_module_inst(parent_exec_env);
     wasm_module_inst_t new_module_inst = NULL;
     ThreadStartArg *thread_start_arg = NULL;
     wasm_function_inst_t start_func;
@@ -354,29 +357,37 @@ int wasm_restore_thread(wasm_exec_env_t cur_exec_env, char* file_prefix) {
     // モジュールインスタンスの生成
     stack_size = ((WASMModuleInstance *)module_inst)->default_wasm_stack_size;
 
+    printf("start init module inst\n");
     if (!(new_module_inst = wasm_runtime_instantiate_internal(
-              module, module_inst, cur_exec_env, stack_size, 0, 0, NULL, 0)))
-        return -1;
+              module, module_inst, parent_exec_env, stack_size, 0, 0, NULL, 0))){
+                  printf("Failed to create new module inst\n");
+                  return -1;
+              }
+
+    printf("done init module inst\n");
 
     // 親からカスタムデータなどを引き継ぐ
     wasm_runtime_set_custom_data_internal(
         new_module_inst, wasm_runtime_get_custom_data(module_inst));
+    printf("done init custom\n");
 
     if (!(wasm_cluster_dup_c_api_imports(new_module_inst, module_inst)))
         goto thread_preparation_fail;
 
     wasm_native_inherit_contexts(new_module_inst, module_inst);
+    printf("done init contexts\n");
 
     // スレッド開始に必要な引数を復元
     if (!(thread_start_arg = wasm_runtime_malloc(sizeof(ThreadStartArg)))) {
         LOG_ERROR("Runtime args allocation failed");
         goto thread_preparation_fail;
     }
+    printf("%sStart constructing Wasm VM\n", file_prefix);
     wasm_restore_thread_start_arg(thread_start_arg, new_module_inst, file_prefix);
-    printf("%sStart constructing Wasm VM", file_prefix);
+    printf("%sStart constructing Wasm VM\n", file_prefix);
 
     // wamrのスレッドの生成．exec_envも新規作成される．
-    ret = wasm_cluster_create_thread(cur_exec_env, new_module_inst, false, 0, 0,
+    ret = wasm_cluster_create_thread(parent_exec_env, new_module_inst, false, 0, 0,
                                      thread_start, thread_start_arg);
     if (ret != 0) {
         LOG_ERROR("Failed to spawn a new thread");

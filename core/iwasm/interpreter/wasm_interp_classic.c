@@ -1761,7 +1761,8 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
 
     if (get_restore_flag()) {
         ThreadStartArg *thread_arg = (ThreadStartArg *)exec_env->thread_arg;
-        if (thread_arg == NULL) {
+        if (exec_env->current_status->signal_flag != WAMR_SIG_RESTORE) {
+            wasm_cluster_thread_send_signal(exec_env, WAMR_SIG_RESTORE);
             printf("メインスレッド\n");
             // メイン
             FILE* fp = open_image("thread_count", "rb");
@@ -1770,15 +1771,46 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
             fread(&thread_count, sizeof(int16), 1, fp);
 
             printf("=======Start restoring %d wasm VM\n", thread_count);
-            // 各wasm vmを復元
-            // メインスレッドは含まないので，thread_count - 1回復元
-            for (int i = 1; i < thread_count; i++) {
-            }
-            // wasm_restore_thread(exec_env, char *file_prefix)
 
-            exit(0);
+            /* thread_state.img からスレッド ID 配列を復元（main は含まない）*/
+            int *thread_ids = wasm_runtime_malloc(sizeof(int) * thread_count);
+            if (!thread_ids) {
+                perror("alloc thread_ids failed");
+                return;
+            }
+            char thread_state_file_name[MAX_FILE_NAME_LENGTH] = "thread_state.img";
+            str_add_prefix(thread_state_file_name, MAIN_THREAD_PREFIX);
+            FILE *thread_state_fp = open_image(thread_state_file_name, "rb");
+            if (!thread_state_fp) {
+                perror("open thread_state.img failed");
+                return;
+            }
+            /* 先頭の thread_count は dump 済みなのでスキップ */
+            int16 dump_thread_count = 0;
+            fread(&dump_thread_count, sizeof(int16), 1, thread_state_fp);
+            /* thread_ids を読み込む (main を除いた数) */
+            int to_read = dump_thread_count > 0 ? dump_thread_count - 1 : 0;
+            fread(thread_ids, sizeof(int), to_read, thread_state_fp);
+            thread_ids[to_read] = -1; /* 終端 */
+            fclose(thread_state_fp);
+
+            for(int *p = thread_ids; *p != -1; p++) {
+                printf("thread_ids : %d\n", *p);
+                int thread_id = *p;
+                char *file_prefix = get_file_prefix(thread_id);
+                printf("Restoring wasm thread %d from %s*\n", thread_id, file_prefix);
+                wasm_restore_thread(exec_env, file_prefix);
+                printf("Done Restoring wasm thread %d from %s*\n", thread_id, file_prefix);
+            }
+            printf("done\n");
+            // wasm_restore_thread(exec_env, char *file_prefix)
         }
+        sleep(-1);
+        // ========子スレッドの処理=========
         printf("メインスレッドじゃない\n");
+        ThreadStartArg *cur_thread_arg = (ThreadStartArg *)exec_env->thread_arg;
+        printf("スレッドid(wasm): %d", cur_thread_arg->thread_id);
+        os_thread_exit(0);
         // bool done_flag;
         int rc;
         struct timespec ts2;

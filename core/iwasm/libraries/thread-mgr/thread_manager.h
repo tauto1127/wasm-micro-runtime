@@ -185,6 +185,7 @@ wasm_cluster_is_thread_terminated(WASMExecEnv *exec_env);
 
 #if WASM_ENABLE_DEBUG_INTERP != 0 || WASM_ENABLE_CR != 0
 #define WAMR_SIG_CHECKPOINT (20)
+#define WAMR_SIG_RESTORE (21)
 #endif
 
 #if WASM_ENABLE_DEBUG_INTERP != 0 || WASM_ENABLE_CR != 0

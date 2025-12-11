@@ -778,6 +778,11 @@ wasm_cluster_create_thread(WASMExecEnv *exec_env,
     new_exec_env->suspend_flags.flags =
         (exec_env->suspend_flags.flags & WASM_SUSPEND_FLAG_INHERIT_MASK);
 
+    /* もし親execenvがWAMR_RESTOREシグナルを持つなら，それを継承する */
+    if (exec_env->current_status->signal_flag == WAMR_SIG_RESTORE) {
+        new_exec_env->current_status->signal_flag = WAMR_SIG_RESTORE;
+    }
+
     if (!wasm_cluster_add_exec_env(cluster, new_exec_env))
         goto fail2;
 
