@@ -271,6 +271,7 @@ wasm_runtime_atomic_wait(WASMModuleInstanceCommon *module, void *address,
 
     bh_assert(module->module_type == Wasm_Module_Bytecode
               || module->module_type == Wasm_Module_AoT);
+    printf("wait called \n");
 
     if (wasm_copy_exception(module_inst, NULL)) {
         return -1;
@@ -407,6 +408,8 @@ wasm_runtime_atomic_notify(WASMModuleInstanceCommon *module, void *address,
     AtomicWaitInfo *wait_info;
     korp_mutex *lock;
     bool out_of_bounds;
+
+    printf("notify called\n");
 
     bh_assert(module->module_type == Wasm_Module_Bytecode
               || module->module_type == Wasm_Module_AoT);

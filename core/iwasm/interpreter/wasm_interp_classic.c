@@ -1773,7 +1773,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
             printf("メインスレッド\n");
             is_main = true;
             // メイン
-            FILE* fp = open_image("thread_count", "rb");
+            FILE* fp = open_image("main-thread_state.img", "rb");
 
             int16 thread_count;
             fread(&thread_count, sizeof(int16), 1, fp);
@@ -1866,6 +1866,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
             frame_sp = dummy_sp;
             frame->ip = frame_ip;
             linear_mem_size = memory ? memory->memory_data_size : 0;
+            frame_ip_end = wasm_get_func_code_end(cur_func);
 
             frame_lp = frame->lp;
             printf("1\n");
@@ -1892,6 +1893,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
             wasm_cluster_send_signal_all(exec_env->cluster, 0);
             // wasm_cluster_wake_up_threads(exec_env->cluster);
             wasm_cluster_thread_continue_all(exec_env->cluster);
+            wasm_shared_memory_wake_waiters();
             FETCH_OPCODE_AND_DISPATCH();
         } else {
             printf("メインスレッドじゃない: %lu and SIG_RESTORE\n", pthread_self());
@@ -1943,6 +1945,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
             frame_sp = dummy_sp;
             frame->ip = frame_ip;
             linear_mem_size = memory ? memory->memory_data_size : 0;
+            frame_ip_end = wasm_get_func_code_end(cur_func);
 
             frame_lp = frame->lp;
             wasm_set_checkpoint(false);
