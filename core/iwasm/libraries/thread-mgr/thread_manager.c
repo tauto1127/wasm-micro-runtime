@@ -541,7 +541,7 @@ wasm_cluster_spawn_exec_env(WASMExecEnv *exec_env)
     }
 
     if (!(new_module_inst = wasm_runtime_instantiate_internal(
-              module, module_inst, exec_env, stack_size, 0, 0, NULL, 0))) {
+              module, module_inst, exec_env, stack_size, 0, 0, false, NULL, 0))) {
         return NULL;
     }
 
@@ -1018,6 +1018,7 @@ wasm_cluster_increase_checkpointing_counter(WASMCluster *cluster)
 
     os_mutex_lock(&counter->lock);
     counter->checkpointing_count++;
+    printf("counter up: %d\n", counter->checkpointing_count);
 
     os_cond_signal(&counter->cond);
     os_mutex_unlock(&counter->lock);

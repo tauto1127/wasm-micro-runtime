@@ -520,7 +520,8 @@ wasm_unload(WASMModule *module);
 WASMModuleInstance *
 wasm_instantiate(WASMModule *module, WASMModuleInstance *parent,
                  WASMExecEnv *exec_env_main, uint32 stack_size,
-                 uint32 heap_size, uint32 max_memory_pages, char *error_buf,
+                 uint32 heap_size, uint32 max_memory_pages,
+                 bool skip_post_instantiate, char *error_buf,
                  uint32 error_buf_size);
 
 void

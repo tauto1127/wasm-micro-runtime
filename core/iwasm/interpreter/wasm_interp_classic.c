@@ -8,6 +8,7 @@
 #include <string.h>
 #include <time.h>
 #include "platform_common.h"
+#include "tid_allocator.h"
 #include "wasm_interp.h"
 #include "bh_log.h"
 #include "wasm_runtime.h"
@@ -1453,9 +1454,10 @@ wasm_interp_call_func_import(WASMModuleInstance *module_inst,
 #define CHECK_SUSPEND_FLAGS()                                         \
     do {                                                              \
         WASM_SUSPEND_FLAGS_LOCK(exec_env->wait_lock);                 \
+        /*
         if (IS_WAMR_CHECKPOINT_SIG(exec_env->current_status->signal_flag)) {\
             CHECKPOINT_THREADS();\
-        }\
+        }\ */\
         if (WASM_SUSPEND_FLAGS_GET(exec_env->suspend_flags)           \
             & WASM_SUSPEND_FLAG_TERMINATE) {                          \
             /* terminate current thread */                            \
@@ -1539,14 +1541,17 @@ static int dispatch_count = 0;
 int ckpt_point = -1;
 #define CHECK_DUMP()                                                        \
     dispatch_count++;                                                       \
-    if (wasm_get_checkpoint() || dispatch_count == ckpt_point) {            \
-        DO_CHECKPOINT();                                                    \
-    }
+    if (IS_WAMR_CHECKPOINT_SIG(exec_env->current_status->signal_flag)) {\
+        CHECKPOINT_THREADS();\
+    }\
+    // if (wasm_get_checkpoint() || dispatch_count == ckpt_point) {            \
+    //     DO_CHECKPOINT();                                                    \
+    // }
 
 // #define FETCH_OPCODE_AND_DISPATCH() goto *handle_table[*frame_ip++]
 #define FETCH_OPCODE_AND_DISPATCH()                                     \
 do {                                                                    \
-/*CHECK_DUMP()                                                        */\
+    CHECK_DUMP()                                                        \
     goto *handle_table[*frame_ip++];                                    \
 } while(0);
 
@@ -1565,7 +1570,7 @@ do {                                                                    \
             wasm_cluster_thread_waiting_run(exec_env);                    \
         }                                                                 \
         os_mutex_unlock(&exec_env->wait_lock);                            \
-        /*CHECK_DUMP();*/                                                     \
+        CHECK_DUMP();                                                    \
         goto *handle_table[*frame_ip++];                                  \
     } while (0)
 #else
@@ -1754,6 +1759,8 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
     clear_refs();
 #endif
 
+    bool is_main = false;
+
     // リストアの初期化時間の計測(終了)
     struct timespec ts1;
     clock_gettime(CLOCK_MONOTONIC, &ts1);
@@ -1764,6 +1771,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
         if (exec_env->current_status->signal_flag != WAMR_SIG_RESTORE) {
             wasm_cluster_thread_send_signal(exec_env, WAMR_SIG_RESTORE);
             printf("メインスレッド\n");
+            is_main = true;
             // メイン
             FILE* fp = open_image("thread_count", "rb");
 
@@ -1794,6 +1802,10 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
             thread_ids[to_read] = -1; /* 終端 */
             fclose(thread_state_fp);
 
+            // tid_allocatorの復元
+            restore_thread_id(thread_ids, thread_count - 1);
+            struct AtomicCounter* counter = wasm_cluster_init_checkpointing_counter(exec_env->cluster, 0);
+
             for(int *p = thread_ids; *p != -1; p++) {
                 printf("thread_ids : %d\n", *p);
                 int thread_id = *p;
@@ -1802,61 +1814,145 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                 wasm_restore_thread(exec_env, file_prefix);
                 printf("Done Restoring wasm thread %d from %s*\n", thread_id, file_prefix);
             }
-            printf("done\n");
+
+            printf("done wasm_restore_thread\n");
+            // ===========メインスレッドをリストア===========
             // wasm_restore_thread(exec_env, char *file_prefix)
-        }
-        sleep(-1);
-        // ========子スレッドの処理=========
-        printf("メインスレッドじゃない\n");
-        ThreadStartArg *cur_thread_arg = (ThreadStartArg *)exec_env->thread_arg;
-        printf("スレッドid(wasm): %d", cur_thread_arg->thread_id);
-        os_thread_exit(0);
-        // bool done_flag;
-        int rc;
-        struct timespec ts2;
+            //
+            // リストア
+            // bool done_flag;
+            int rc;
+            struct timespec ts2;
 
-        clock_gettime(CLOCK_MONOTONIC, &ts1);
-        frame = wasm_restore_stack(&exec_env);
-        clock_gettime(CLOCK_MONOTONIC, &ts2);
-        fprintf(stderr, "stack, %lu\n", get_time(ts1, ts2));
-        if (frame == NULL) {
-            perror("Error:wasm_interp_func_bytecode:frame is NULL\n");
-            return;
-        }
-        // debug_wasm_interp_frame(frame, module->e->functions);
+            clock_gettime(CLOCK_MONOTONIC, &ts1);
+            printf("get_file_prefix\n");
+            char *file_prefix = get_file_prefix(-1);
+            printf("wasm_restore_stack\n");
+            // ここで core dumped
+            frame = wasm_restore_stack(&exec_env, file_prefix);
+            printf("done wasm_restore_stack\n");
+            clock_gettime(CLOCK_MONOTONIC, &ts2);
+            fprintf(stderr, "stack, %lu\n", get_time(ts1, ts2));
+            if (frame == NULL) {
+                perror("Error:wasm_interp_func_bytecode:frame is NULL\n");
+                return;
+            }
+            // debug_wasm_interp_frame(frame, module->e->functions);
 
-        cur_func = frame->function;
-        prev_frame = frame->prev_frame;
-        if (cur_func == NULL) {
-            perror("Error:wasm_interp_func_bytecode:cur_func is null\n");
-            return;
-        }
-        if (prev_frame == NULL) {
-            perror("Error:wasm_interp_func_bytecode:prev_frame is null\n");
-            return;
-        }
+            cur_func = frame->function;
+            prev_frame = frame->prev_frame;
+            if (cur_func == NULL) {
+                perror("Error:wasm_interp_func_bytecode:cur_func is null\n");
+                return;
+            }
+            if (prev_frame == NULL) {
+                perror("Error:wasm_interp_func_bytecode:prev_frame is null\n");
+                return;
+            }
 
-        uint8 *dummy_ip;
-        uint32 *dummy_lp, *dummy_sp;
-        rc = wasm_restore(&module, &exec_env, &cur_func, &prev_frame,
-                        &memory, &globals, &global_data, &global_addr,
-                        &frame, &dummy_ip, &dummy_lp, &dummy_sp, &frame_csp,
-                        &frame_ip_end, &else_addr, &end_addr, &maddr, &done_flag);
-        if (rc < 0) {
-            // error
-            perror("failed to restore\n");
-            return;
-        }
-        frame_ip = dummy_ip;
-        frame_lp = dummy_lp;
-        frame_sp = dummy_sp;
-        frame->ip = frame_ip;
-        linear_mem_size = memory ? memory->memory_data_size : 0;
+            uint8 *dummy_ip;
+            uint32 *dummy_lp, *dummy_sp;
+            rc = wasm_restore(&module, &exec_env, &cur_func, &prev_frame,
+                            &memory, &globals, &global_data, &global_addr,
+                            &frame, &dummy_ip, &dummy_lp, &dummy_sp, &frame_csp,
+                            &frame_ip_end, &else_addr, &end_addr, &maddr, &done_flag, file_prefix);
+            if (rc < 0) {
+                // error
+                perror("failed to restore\n");
+                return;
+            }
+            frame_ip = dummy_ip;
+            frame_lp = dummy_lp;
+            frame_sp = dummy_sp;
+            frame->ip = frame_ip;
+            linear_mem_size = memory ? memory->memory_data_size : 0;
 
-        frame_lp = frame->lp;
-        wasm_set_checkpoint(false);
-        UPDATE_ALL_FROM_FRAME();
-        FETCH_OPCODE_AND_DISPATCH();
+            frame_lp = frame->lp;
+            printf("1\n");
+            wasm_set_checkpoint(false);
+            printf("2\n");
+            UPDATE_ALL_FROM_FRAME();
+            printf("3\n");
+            // これでインタープリター再開
+            printf("done main checkpoint\n");
+            wasm_cluster_increase_checkpointing_counter(exec_env->cluster);
+
+            // ここで全てのスレッドのリストアを待つ．
+            os_mutex_lock(&counter->lock);
+            for(;;) {
+                if (thread_count == counter->checkpointing_count) {
+                    os_mutex_unlock(&counter->lock);
+                    break;
+                }
+
+                os_cond_wait(&counter->cond, &counter->lock);
+            }
+            os_mutex_unlock(&counter->lock);
+            printf("========all threads restore done\n");
+            wasm_cluster_send_signal_all(exec_env->cluster, 0);
+            // wasm_cluster_wake_up_threads(exec_env->cluster);
+            wasm_cluster_thread_continue_all(exec_env->cluster);
+            FETCH_OPCODE_AND_DISPATCH();
+        } else {
+            printf("メインスレッドじゃない: %lu and SIG_RESTORE\n", pthread_self());
+            ThreadStartArg *cur_thread_arg = (ThreadStartArg *)exec_env->thread_arg;
+            printf("%d Started interpretor\n", cur_thread_arg->thread_id);
+            char *file_prefix = get_file_prefix(cur_thread_arg->thread_id);
+
+            // リストア
+            // bool done_flag;
+            int rc;
+            struct timespec ts2;
+
+            clock_gettime(CLOCK_MONOTONIC, &ts1);
+            printf("%d start restore stack\n", thread_arg->thread_id);
+            frame = wasm_restore_stack(&exec_env, file_prefix);
+            printf("%d restore stack done\n", thread_arg->thread_id);
+            clock_gettime(CLOCK_MONOTONIC, &ts2);
+            fprintf(stderr, "stack, %lu\n", get_time(ts1, ts2));
+            if (frame == NULL) {
+                perror("Error:wasm_interp_func_bytecode:frame is NULL\n");
+                return;
+            }
+            // debug_wasm_interp_frame(frame, module->e->functions);
+
+            cur_func = frame->function;
+            prev_frame = frame->prev_frame;
+            if (cur_func == NULL) {
+                perror("Error:wasm_interp_func_bytecode:cur_func is null\n");
+                return;
+            }
+            if (prev_frame == NULL) {
+                perror("Error:wasm_interp_func_bytecode:prev_frame is null\n");
+                return;
+            }
+
+            uint8 *dummy_ip;
+            uint32 *dummy_lp, *dummy_sp;
+            rc = wasm_restore(&module, &exec_env, &cur_func, &prev_frame,
+                            &memory, &globals, &global_data, &global_addr,
+                            &frame, &dummy_ip, &dummy_lp, &dummy_sp, &frame_csp,
+                            &frame_ip_end, &else_addr, &end_addr, &maddr, &done_flag, file_prefix);
+            if (rc < 0) {
+                // error
+                perror("failed to restore\n");
+                return;
+            }
+            frame_ip = dummy_ip;
+            frame_lp = dummy_lp;
+            frame_sp = dummy_sp;
+            frame->ip = frame_ip;
+            linear_mem_size = memory ? memory->memory_data_size : 0;
+
+            frame_lp = frame->lp;
+            wasm_set_checkpoint(false);
+            UPDATE_ALL_FROM_FRAME();
+            printf("%d done checkpoint\n", cur_thread_arg->thread_id);
+            wasm_cluster_increase_checkpointing_counter(exec_env->cluster);
+            wasm_cluster_thread_waiting_run(exec_env);                 \
+            printf("%d: thread run\n", cur_thread_arg->thread_id);
+            FETCH_OPCODE_AND_DISPATCH();
+        }
     }
 
 #if WASM_ENABLE_LABELS_AS_VALUES == 0

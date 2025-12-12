@@ -13,4 +13,6 @@ typedef struct {
 
 void deallocate_thread_id(int32 thread_id);
 
+void restore_thread_id(int32* thread_id, uint32 size);
+
 void *thread_start(void *arg);

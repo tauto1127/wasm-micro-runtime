@@ -558,7 +558,7 @@ int wasm_dump_thread_states(WASMExecEnv *exec_env, char* file_prefix) {
 
     //子スレッド
     FILE *fp;
-    char file_name[MAX_FILE_NAME_LENGTH] = "thread_sta.img";
+    char file_name[MAX_FILE_NAME_LENGTH] = "thread_state.img";
     str_add_prefix(file_name, file_prefix);
     fp = open_image(file_name, "wb");
     if (fp == NULL) {

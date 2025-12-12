@@ -9,7 +9,7 @@ void set_restore_flag(bool f);
 bool get_restore_flag();
 
 WASMInterpFrame*
-wasm_restore_stack(WASMExecEnv **exec_env);
+wasm_restore_stack(WASMExecEnv **exec_env, char* file_prefix);
 
 // static inline void
 // debug_wasm_interp_frame(WASMInterpFrame *frame, WASMFunctionInstance* base_func_addr) {
@@ -43,5 +43,6 @@ int wasm_restore(WASMModuleInstance **module,
             uint8 **else_addr,
             uint8 **end_addr,
             uint8 **maddr,
-            bool *done_flag);
+            bool *done_flag,
+            char* file_prefix);
 #endif // _WASM_RESTORE_H

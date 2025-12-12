@@ -2126,7 +2126,8 @@ wasm_set_running_mode(WASMModuleInstance *module_inst, RunningMode running_mode)
 WASMModuleInstance *
 wasm_instantiate(WASMModule *module, WASMModuleInstance *parent,
                  WASMExecEnv *exec_env_main, uint32 stack_size,
-                 uint32 heap_size, uint32 max_memory_pages, char *error_buf,
+                 uint32 heap_size, uint32 max_memory_pages,
+                 bool skip_post_instantiate, char *error_buf,
                  uint32 error_buf_size)
 {
     WASMModuleInstance *module_inst;
@@ -3033,8 +3034,10 @@ wasm_instantiate(WASMModule *module, WASMModuleInstance *parent,
                 &module_inst->e->functions[module->start_function];
     }
 
-    if (!execute_post_instantiate_functions(module_inst, is_sub_inst,
-                                            exec_env_main)) {
+    // リストア時はここでリストアが実行される．そして，そのままインタープリタが実行される．
+    if (!skip_post_instantiate
+        && !execute_post_instantiate_functions(module_inst, is_sub_inst,
+                                               exec_env_main)) {
         set_error_buf(error_buf, error_buf_size, module_inst->cur_exception);
         goto fail;
     }

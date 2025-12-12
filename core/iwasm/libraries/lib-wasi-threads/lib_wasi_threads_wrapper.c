@@ -37,6 +37,13 @@ deallocate_thread_id(int32 thread_id)
     os_mutex_unlock(&thread_id_lock);
 }
 
+void
+restore_thread_id(int32* thread_id, uint32 size) {
+    os_mutex_lock(&thread_id_lock);
+    tid_allocator_restore(&tid_allocator, thread_id, size);
+    os_mutex_unlock(&thread_id_lock);
+}
+
 void *
 thread_start(void *arg)
 {
@@ -79,7 +86,7 @@ thread_spawn_wrapper(wasm_exec_env_t exec_env, uint32 start_arg)
     stack_size = ((WASMModuleInstance *)module_inst)->default_wasm_stack_size;
 
     if (!(new_module_inst = wasm_runtime_instantiate_internal(
-              module, module_inst, exec_env, stack_size, 0, 0, NULL, 0)))
+              module, module_inst, exec_env, stack_size, 0, 0, false, NULL, 0)))
         return -1;
 
     wasm_runtime_set_custom_data_internal(
