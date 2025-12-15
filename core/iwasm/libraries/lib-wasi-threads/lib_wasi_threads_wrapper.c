@@ -15,6 +15,9 @@
 #if WASM_ENABLE_AOT != 0
 #include "aot_runtime.h"
 #endif
+#if WASM_ENABLE_SHARED_MEMORY != 0
+#include "../common/wasm_shared_memory.h"
+#endif
 
 static korp_mutex thread_id_lock;
 static TidAllocator tid_allocator;
@@ -55,9 +58,16 @@ thread_start(void *arg)
     argv[0] = thread_arg->thread_id;
     argv[1] = thread_arg->arg;
 
+    printf("[thread_start] tid=%d entering wasm_runtime_call_wasm\n",
+           thread_arg->thread_id);
     if (!wasm_runtime_call_wasm(exec_env, thread_arg->start_func, 2, argv)) {
-        /* Exception has already been spread during throwing */
+        /* Log the exception for diagnosis */
+        const char *exc = wasm_runtime_get_exception((wasm_module_inst_t)exec_env->module_inst);
+        printf("[thread_start] tid=%d exception: %s\n",
+               thread_arg->thread_id, exc ? exc : "(null)");
     }
+    printf("[thread_start] tid=%d leaving wasm_runtime_call_wasm\n",
+           thread_arg->thread_id);
 
     // Routine exit
     deallocate_thread_id(thread_arg->thread_id);
@@ -103,6 +113,23 @@ thread_spawn_wrapper(wasm_exec_env_t exec_env, uint32 start_arg)
         LOG_ERROR("Failed to find thread start function %s",
                   THREAD_START_FUNCTION);
         goto thread_preparation_fail;
+    }
+    /* Debug: verify shared memory reuse */
+    if (((WASMModuleInstance *)module_inst)->memories[0]
+        && ((WASMModuleInstance *)new_module_inst)->memories[0]) {
+        fprintf(stderr,
+                "[thread_spawn] parent mem=%p size=%zu new mem=%p size=%zu "
+                "shared=%d\n",
+                ((WASMModuleInstance *)module_inst)->memories[0]->memory_data,
+                (size_t)((WASMModuleInstance *)module_inst)->memories[0]
+                    ->memory_data_size,
+                ((WASMModuleInstance *)new_module_inst)->memories[0]
+                    ->memory_data,
+                (size_t)((WASMModuleInstance *)new_module_inst)->memories[0]
+                    ->memory_data_size,
+                shared_memory_is_shared(
+                    ((WASMModuleInstance *)module_inst)->memories[0]));
+        fflush(stderr);
     }
 
     if (!(thread_start_arg = wasm_runtime_malloc(sizeof(ThreadStartArg)))) {

@@ -1,0 +1,51 @@
+# Context dump
+# Generated: $(date -Iseconds)
+
+## Environment contexts provided
+1) Initial (read-only sandbox)
+   - sandbox_mode: read-only
+   - network_access: restricted
+   - shell: zsh
+2) Later (workspace-write sandbox)
+   - sandbox_mode: workspace-write
+   - network_access: restricted
+   - shell: zsh
+3) Current
+   - sandbox_mode: danger-full-access
+   - network_access: enabled
+   - approval_policy: never
+   - shell: zsh
+
+## Working directories seen
+- /home/takuto1127/wamr-2.1.0-with-wasi-threads (repo root)
+- /home/takuto1127/wamr-2.1.0-with-wasi-threads/product-mini/platforms/linux/build (build dir)
+- /home/takuto1127/wamr-2.1.0-with-wasi-threads/wasm-sample/threads-echo (sample app)
+
+## Notes from investigation
+- Rebuilt iwasm multiple times with instrumentation (wait/notify logging, thread start/exit logging).
+- threads-echo restore still stalls: child threads print once then stop; main keeps printing.
+- Added debug logs in:
+  * core/iwasm/common/wasm_shared_memory.c (wait/notify offsets)
+  * core/iwasm/libraries/lib-wasi-threads/lib_wasi_threads_wrapper.c (thread_start entry/exit)
+  * core/iwasm/libraries/thread-mgr/thread_manager.c (native routine return)
+
+## Pending work
+- Determine where child threads block after restore (likely WASI sleep/timer path).
+- Add logging to WASI timer syscalls if needed.
+
+## Build and run commands used
+- Build WAMR (product-mini/linux):
+  cd /home/takuto1127/wamr-2.1.0-with-wasi-threads/product-mini/platforms/linux/build && make -j8
+
+- Run threads-echo normally:
+  cd /home/takuto1127/wamr-2.1.0-with-wasi-threads/wasm-sample/threads-echo && \
+  ~/wamr-2.1.0-with-wasi-threads/product-mini/platforms/linux/build/iwasm --max-threads=32 threads-echo.wasm
+
+- Run threads-echo with restore:
+  cd /home/takuto1127/wamr-2.1.0-with-wasi-threads/wasm-sample/threads-echo && \
+  ~/wamr-2.1.0-with-wasi-threads/product-mini/platforms/linux/build/iwasm --max-threads=32 --restore threads-echo.wasm
+
+- Captured log example:
+  ~/wamr-2.1.0-with-wasi-threads/product-mini/platforms/linux/build/iwasm --max-threads=32 --restore \
+    /home/takuto1127/wamr-2.1.0-with-wasi-threads/wasm-sample/threads-echo/threads-echo.wasm \
+    > /home/takuto1127/wamr-2.1.0-with-wasi-threads/product-mini/platforms/linux/build/threads-echo.log 2>&1

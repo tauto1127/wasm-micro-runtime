@@ -51,6 +51,7 @@ _restore_stack(WASMExecEnv *exec_env, WASMInterpFrame *frame, FILE *fp)
 {
     WASMModuleInstance *module_inst = exec_env->module_inst;
     WASMFunctionInstance *func = frame->function;
+    ThreadStartArg *thread_arg = (ThreadStartArg *)exec_env->thread_arg;
     int read_size = 0;
 
     // 初期化
@@ -73,13 +74,20 @@ _restore_stack(WASMExecEnv *exec_env, WASMInterpFrame *frame, FILE *fp)
     uint32 locals = func->param_count + func->local_count;
     uint32 full_type_stack_size, type_stack_size;
     fread(&full_type_stack_size, sizeof(uint32), 1, fp);
-    type_stack_size = full_type_stack_size - locals;                                      // 統一フォーマットでは、ローカルも型/値スタックに入れているが、WAMRの型/値スタックのサイズはローカル抜き
+    /* If the dumper failed to embed locals in the type stack (e.g. when
+     * tablemap files are missing), full_type_stack_size can be smaller
+     * than locals. Clamp to avoid underflow/overflow on restore. */
+    if (full_type_stack_size < locals) {
+        type_stack_size = 0;
+        /* Skip any locals data that might not exist in the file */
+    }
+    else {
+        type_stack_size = full_type_stack_size - locals;
+        fseek(fp, sizeof(uint8) * locals, SEEK_CUR); /* skip locals */
+    }
     // frame->tsp = frame->tsp_bottom + type_stack_size;
 
-    // 型スタックの中身
-    fseek(fp, sizeof(uint8)*locals, SEEK_CUR);                      // localのやつはWAMRでは必要ないので飛ばす
-
-    uint8 type_stack[type_stack_size];
+    uint8 type_stack[type_stack_size > 0 ? type_stack_size : 1];
     // uint32* tsp_bottom = frame->tsp_bottom;
     for (uint32 i = 0; i < type_stack_size; ++i) {
         fread(&type_stack[i], sizeof(uint8), 1, fp);
@@ -103,6 +111,10 @@ _restore_stack(WASMExecEnv *exec_env, WASMInterpFrame *frame, FILE *fp)
     fread(&ctrl_stack_size, sizeof(uint32), 1, fp);
     frame->csp = frame->csp_bottom + ctrl_stack_size;
 
+    printf("[_restore_stack] tid=%d func_idx=%u ctrl_stack_size=%u type_stack_size=%u value_stack_size=%u\n",
+           thread_arg ? thread_arg->thread_id : -999, fidx, ctrl_stack_size,
+           type_stack_size, value_stack_size);
+    fflush(stdout);
 
     // ラベルスタックの中身
     WASMBranchBlock *csp = frame->csp_bottom;
@@ -138,6 +150,8 @@ wasm_restore_stack(WASMExecEnv **_exec_env, char* file_prefix)
 {
     printf("restore stack\n");
     WASMExecEnv *exec_env = *_exec_env;
+    ThreadStartArg *thread_arg = (ThreadStartArg *)exec_env->thread_arg;
+    int tid = thread_arg ? thread_arg->thread_id : -999;
     WASMModuleInstance *module_inst =
         (WASMModuleInstance *)exec_env->module_inst;
     WASMInterpFrame *frame, *prev_frame = wasm_exec_env_get_cur_frame(exec_env);
@@ -154,7 +168,9 @@ wasm_restore_stack(WASMExecEnv **_exec_env, char* file_prefix)
     fclose(fp);
 
     uint32 fidx = 0;
-    printf("for文\n");
+    printf("[wasm_restore_stack] tid=%d frame_count=%u prefix=%s\n",
+           tid, frame_stack_size, file_prefix);
+    fflush(stdout);
     char file_name_stack[MAX_FILE_NAME_LENGTH] = "";
     for (uint32 i = frame_stack_size; i > 0; --i) {
         // char* file_name_stack = wasm_runtime_malloc(sizeof(char) * MAX_FILE_NAME_LENGTH);
@@ -163,6 +179,9 @@ wasm_restore_stack(WASMExecEnv **_exec_env, char* file_prefix)
         fp = open_image(file_name_stack, "rb");
 
         fread(&fidx, sizeof(uint32), 1, fp);
+        printf("[wasm_restore_stack] tid=%d reading %s fidx=%u (i=%u)\n",
+               tid, file_name_stack, fidx, i);
+        fflush(stdout);
         // 関数からスタックサイズを計算し,ALLOC
         // 前のframe2のenter_func_idxが、このframe->functionに対応
         function = module_inst->e->functions + fidx;
@@ -284,6 +303,43 @@ int wasm_restore_program_counter(
     return 0;
 }
 
+/* Restore TLS block for this thread. */
+static int
+wasm_restore_tls(WASMMemoryInstance *memory, uint8 *global_data,
+                 char *file_prefix)
+{
+    char file_name[MAX_FILE_NAME_LENGTH] = "tls.img";
+    str_add_prefix(file_name, file_prefix);
+    FILE *fp = open_image(file_name, "rb");
+    if (!fp) {
+        return -1;
+    }
+
+    uint32 start = 0, size = 0;
+    fread(&start, sizeof(uint32), 1, fp);
+    fread(&size, sizeof(uint32), 1, fp);
+
+    /* Recover TLS base from image size. tls_size lives in the 3rd global
+     * (see wasm_dump_tls). headroom = size - tls_size. Do this even if the
+     * current linear memory is smaller (worker restore runs before main
+     * memory is enlarged). */
+    uint32 *g = (uint32 *)global_data;
+    uint32 tls_size = g[2];
+    uint32 headroom = size > tls_size ? size - tls_size : 0;
+    uint32 tls_base = start + headroom;
+    g[0] = tls_base; /* ensure __tls_base matches the restored image */
+
+    printf("[restore_tls] prefix=%s start=0x%x size=%u tls_size=%u headroom=%u base=0x%x mem_size=%lu\n",
+           file_prefix, start, size, tls_size, headroom, tls_base,
+           (uint64)memory->memory_data_size);
+
+    if (start + size <= memory->memory_data_size) {
+        fread(memory->memory_data + start, 1, size, fp);
+    }
+    fclose(fp);
+    return 0;
+}
+
 int wasm_restore(WASMModuleInstance **module,
             WASMExecEnv **exec_env,
             WASMFunctionInstance **cur_func,
@@ -305,8 +361,12 @@ int wasm_restore(WASMModuleInstance **module,
             char* file_prefix)
 {
     struct timespec ts1, ts2;
-    // メインスレッドのみ復元
-    if (strcmp(file_prefix, MAIN_THREAD_PREFIX) == 0) {
+    fprintf(stderr, "[wasm_restore] start prefix=%s\n", file_prefix);
+    /* 共有メモリの場合、worker スレッド側でも線形メモリを先に復元して
+     * TLS コピーに十分なサイズを確保する。メインスレッドの復元と同じ内容
+     * を複数回書き込むが、どちらも同一データなので安全。 */
+    if (strcmp(file_prefix, MAIN_THREAD_PREFIX) == 0
+        || (*memory)->is_shared_memory) {
         // restore memory
         clock_gettime(CLOCK_MONOTONIC, &ts1);
         wasm_restore_memory(*module, memory, maddr, file_prefix);
@@ -322,6 +382,22 @@ int wasm_restore(WASMModuleInstance **module,
     fprintf(stderr, "global, %lu\n", get_time(ts1, ts2));
     // printf("Success to restore globals\n");
 
+    /* restore TLS */
+    clock_gettime(CLOCK_MONOTONIC, &ts1);
+    wasm_restore_tls(*memory, *global_data, file_prefix);
+    clock_gettime(CLOCK_MONOTONIC, &ts2);
+    fprintf(stderr, "tls, %lu\n", get_time(ts1, ts2));
+
+    /* Hack: stdout FILE ロックのデッドロック回避用にロックワードをクリア。
+       atomic.wait が発火する addr_off=3860 付近（8byte）を 0 に戻す。
+       メインのメモリだけ触る。 */
+    if (strcmp(file_prefix, MAIN_THREAD_PREFIX) == 0) {
+        if ((*memory)->memory_data_size > 3868) {
+            memset((*memory)->memory_data + 3860, 0, 8);
+            fprintf(stderr, "[hack] cleared lock word at 3860\n");
+        }
+    }
+
     // restore program counter
     clock_gettime(CLOCK_MONOTONIC, &ts1);
     wasm_restore_program_counter(*module, frame_ip, file_prefix);
@@ -329,6 +405,7 @@ int wasm_restore(WASMModuleInstance **module,
     fprintf(stderr, "program counter, %lu\n", get_time(ts1, ts2));
     // printf("Success to program counter\n");
 
+    fprintf(stderr, "[wasm_restore] end prefix=%s\n", file_prefix);
     return 0;
 }
 
@@ -391,6 +468,22 @@ int wasm_restore_thread(wasm_exec_env_t parent_exec_env, char* file_prefix) {
                   printf("Failed to create new module inst\n");
                   return -1;
               }
+    if (((WASMModuleInstance *)module_inst)->memories[0]
+        && ((WASMModuleInstance *)new_module_inst)->memories[0]) {
+        fprintf(stderr,
+                "[restore_thread] parent mem=%p size=%zu new mem=%p size=%zu "
+                "shared=%d\n",
+                ((WASMModuleInstance *)module_inst)->memories[0]->memory_data,
+                (size_t)((WASMModuleInstance *)module_inst)->memories[0]
+                    ->memory_data_size,
+                ((WASMModuleInstance *)new_module_inst)->memories[0]
+                    ->memory_data,
+                (size_t)((WASMModuleInstance *)new_module_inst)->memories[0]
+                    ->memory_data_size,
+                shared_memory_is_shared(
+                    ((WASMModuleInstance *)module_inst)->memories[0]));
+        fflush(stderr);
+    }
 
     printf("done init module inst\n");
 
@@ -421,3 +514,6 @@ int wasm_restore_thread(wasm_exec_env_t parent_exec_env, char* file_prefix) {
     return 0;
 }
 #endif // WASM_ENABLE_FAST_INTERP != 0
+#if WASM_ENABLE_SHARED_MEMORY != 0
+#include "../interpreter/../common/wasm_shared_memory.h"
+#endif

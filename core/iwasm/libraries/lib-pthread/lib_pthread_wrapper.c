@@ -512,10 +512,16 @@ pthread_start_routine(void *arg)
     wasm_exec_env_set_thread_info(exec_env);
     argv[0] = routine_args->arg;
 
+    printf("[pthread_start] handle=%u entering elem_index=%u\n",
+           info_node->handle, routine_args->elem_index);
     if (!wasm_runtime_call_indirect(exec_env, routine_args->elem_index, 1,
                                     argv)) {
-        /* Exception has already been spread during throwing */
+        const char *exc =
+            wasm_runtime_get_exception((wasm_module_inst_t)exec_env->module_inst);
+        printf("[pthread_start] handle=%u exception: %s\n", info_node->handle,
+               exc ? exc : "(null)");
     }
+    printf("[pthread_start] handle=%u leaving wasm call\n", info_node->handle);
 
     /* destroy pthread key values */
     call_key_destructor(exec_env);

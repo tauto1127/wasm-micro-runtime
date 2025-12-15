@@ -10,6 +10,7 @@
 #if WASM_ENABLE_THREAD_MGR != 0
 #include "../libraries/thread-mgr/thread_manager.h"
 #endif
+#include <pthread.h>
 
 /*
  * Note: this lock can be per memory.
@@ -271,7 +272,21 @@ wasm_runtime_atomic_wait(WASMModuleInstanceCommon *module, void *address,
 
     bh_assert(module->module_type == Wasm_Module_Bytecode
               || module->module_type == Wasm_Module_AoT);
-    printf("wait called \n");
+    /* Debug: print wait address offset/value and tid to trace wake mismatches */
+    if (!wait64) {
+        printf("wait called addr_off=%zu expect=%u actual=%u tid=%lu\n",
+               (size_t)((uint8 *)address
+                        - module_inst->memories[0]->memory_data),
+               (unsigned)*(uint32 *)&expect, *(uint32 *)address,
+               (unsigned long)pthread_self());
+    }
+    else {
+        printf("wait called addr_off=%zu expect=%llu actual=%llu tid=%lu\n",
+               (size_t)((uint8 *)address
+                        - module_inst->memories[0]->memory_data),
+               (unsigned long long)expect, (unsigned long long)*(uint64 *)address,
+               (unsigned long)pthread_self());
+    }
 
     if (wasm_copy_exception(module_inst, NULL)) {
         return -1;
@@ -396,6 +411,10 @@ wasm_runtime_atomic_wait(WASMModuleInstanceCommon *module, void *address,
 
     os_mutex_unlock(lock);
 
+    printf("wait return addr_off=%zu ret=%u tid=%lu\n",
+           (size_t)((uint8 *)address - module_inst->memories[0]->memory_data),
+           is_timeout ? 2 : 0, (unsigned long)pthread_self());
+
     return is_timeout ? 2 : 0;
 }
 
@@ -446,6 +465,10 @@ wasm_runtime_atomic_notify(WASMModuleInstanceCommon *module, void *address,
         return 0;
     }
 
+    /* Debug: notify target offset and current value */
+    printf("notify called addr_off=%zu count=%u cur=%u tid=%lu\n",
+           (size_t)((uint8 *)address - module_inst->memories[0]->memory_data),
+           count, *(uint32 *)address, (unsigned long)pthread_self());
     /* Notify each wait node in the wait list */
     notify_result = notify_wait_list(wait_info->wait_list, count);
 

@@ -679,6 +679,16 @@ thread_manager_start_routine(void *arg)
 
     ret = exec_env->thread_start_routine(exec_env);
 
+#if WASM_ENABLE_CR != 0 || WASM_ENABLE_DEBUG_INTERP != 0 || 1
+    /* Debug: log when a wasm thread native routine returns */
+    {
+        const char *exc = wasm_runtime_get_exception(
+            (wasm_module_inst_t)exec_env->module_inst);
+        printf("[thread_mgr] thread %p routine returned, exception=%s\n",
+               (void *)exec_env, exc ? exc : "(null)");
+    }
+#endif
+
 #ifdef OS_ENABLE_HW_BOUND_CHECK
     os_mutex_lock(&exec_env->wait_lock);
     if (WASM_SUSPEND_FLAGS_GET(exec_env->suspend_flags)

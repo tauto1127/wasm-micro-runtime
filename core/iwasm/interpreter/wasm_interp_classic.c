@@ -16,6 +16,7 @@
 #include "wasm_loader.h"
 #include "wasm_memory.h"
 #include "thread_manager.h"
+#include "../../shared/utils/bh_list.h"
 #include "lib_wasi_threads_wrapper.h"
 #include "../common/wasm_exec_env.h"
 #include "../migration/wasm_migration.h"
@@ -1555,6 +1556,43 @@ do {                                                                    \
     goto *handle_table[*frame_ip++];                                    \
 } while(0);
 
+/* --------------------------------------------------------------------- */
+/* Helper: write musl pthread tid into TLS block after restore.          */
+/* Layout is from musl struct pthread on wasm32: tid is at offset 0x3c   */
+/* (60) inside the TLS block where __wasilibc_pthread_self lives.        */
+/* If this ever changes, adjust TLS_TID_OFFSET accordingly.              */
+#define TLS_TID_OFFSET 60
+static inline void
+set_restored_tls_tid(WASMExecEnv *exec_env, int32 thread_id)
+{
+    WASMModuleInstance *inst = (WASMModuleInstance *)exec_env->module_inst;
+    /* __tls_base is stored in the first global slot of the restored     */
+    /* instance (see global.img). We assume 32-bit pointers.             */
+    uint32 tls_base = *(uint32 *)inst->global_data;
+    uint8 *mem = inst->memories[0]->memory_data;
+    /* Guard against out-of-bounds. */
+    if (tls_base + TLS_TID_OFFSET + sizeof(int32)
+        <= inst->memories[0]->memory_data_size) {
+        *(int32 *)(mem + tls_base + TLS_TID_OFFSET) = thread_id;
+        printf("[restore] set tls tid=%d at 0x%x\n", thread_id, tls_base);
+    }
+}
+
+static inline void
+log_tls_tid(WASMExecEnv *exec_env, const char *tag)
+{
+    WASMModuleInstance *inst = (WASMModuleInstance *)exec_env->module_inst;
+    uint32 tls_base = *(uint32 *)inst->global_data;
+    uint8 *mem = inst->memories[0]->memory_data;
+    int32 tid = 0;
+    if (tls_base + TLS_TID_OFFSET + sizeof(int32)
+        <= inst->memories[0]->memory_data_size) {
+        tid = *(int32 *)(mem + tls_base + TLS_TID_OFFSET);
+    }
+    printf("[%s] tls_base=0x%x tid=%d\n", tag, tls_base, tid);
+    fflush(stdout);
+}
+
 // HANDLE_OP_END();
 #if WASM_ENABLE_THREAD_MGR != 0 && WASM_ENABLE_DEBUG_INTERP != 0
 #define HANDLE_OP_END()                                                   \
@@ -1768,6 +1806,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
 
     if (get_restore_flag()) {
         ThreadStartArg *thread_arg = (ThreadStartArg *)exec_env->thread_arg;
+        int main_tid = thread_arg ? thread_arg->thread_id : -1;
         if (exec_env->current_status->signal_flag != WAMR_SIG_RESTORE) {
             wasm_cluster_thread_send_signal(exec_env, WAMR_SIG_RESTORE);
             printf("メインスレッド\n");
@@ -1816,6 +1855,12 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
             }
 
             printf("done wasm_restore_thread\n");
+            /* Restore main thread TLS tid as well (worker threads set theirs
+             * later). Use a non-zero default distinct from futex unlock value.
+             */
+            set_restored_tls_tid(exec_env, 0x3fffffff);
+            log_tls_tid(exec_env, "main-after-restore");
+            fflush(stdout);
             // ===========メインスレッドをリストア===========
             // wasm_restore_thread(exec_env, char *file_prefix)
             //
@@ -1852,6 +1897,9 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
 
             uint8 *dummy_ip;
             uint32 *dummy_lp, *dummy_sp;
+            printf("[main restore] calling wasm_restore thread_id=%d pthread=%lu\n",
+                   main_tid, (unsigned long)pthread_self());
+            fflush(stdout);
             rc = wasm_restore(&module, &exec_env, &cur_func, &prev_frame,
                             &memory, &globals, &global_data, &global_addr,
                             &frame, &dummy_ip, &dummy_lp, &dummy_sp, &frame_csp,
@@ -1861,6 +1909,12 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                 perror("failed to restore\n");
                 return;
             }
+            /* tls_base may be normalized in wasm_restore_tls; refresh tid. */
+            set_restored_tls_tid(exec_env, 0x3fffffff);
+            log_tls_tid(exec_env, "main-after-restore");
+            printf("[main restore] after wasm_restore thread_id=%d pthread=%lu\n",
+                   main_tid, (unsigned long)pthread_self());
+            fflush(stdout);
             frame_ip = dummy_ip;
             frame_lp = dummy_lp;
             frame_sp = dummy_sp;
@@ -1869,6 +1923,19 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
             frame_ip_end = wasm_get_func_code_end(cur_func);
 
             frame_lp = frame->lp;
+            /* Debug: show restore point for this thread */
+            {
+                const char *fname = "<no-name>";
+#if WASM_ENABLE_CUSTOM_NAME_SECTION != 0
+                if (cur_func->u.func->field_name) {
+                    fname = cur_func->u.func->field_name;
+                }
+#endif
+                printf("thread %d restored func=%s ip_off=%ld code_size=%u\n",
+                       main_tid, fname,
+                       (long)(frame_ip - cur_func->u.func->code),
+                       (unsigned)cur_func->u.func->code_size);
+            }
             printf("1\n");
             wasm_set_checkpoint(false);
             printf("2\n");
@@ -1881,6 +1948,9 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
             // ここで全てのスレッドのリストアを待つ．
             os_mutex_lock(&counter->lock);
             for(;;) {
+                printf("[main restore] waiting: have=%d need=%d\n",
+                       counter->checkpointing_count, thread_count);
+                fflush(stdout);
                 if (thread_count == counter->checkpointing_count) {
                     os_mutex_unlock(&counter->lock);
                     break;
@@ -1889,6 +1959,18 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                 os_cond_wait(&counter->cond, &counter->lock);
             }
             os_mutex_unlock(&counter->lock);
+            /* After linear memory has been restored (only main thread does it),
+             * rewrite pthread tids for all exec_envs so libc locks/futexes use
+             * the correct values. */
+            {
+                bh_list *l = &exec_env->cluster->exec_env_list;
+                for (WASMExecEnv *iter = bh_list_first_elem(l); iter;
+                     iter = bh_list_elem_next(iter)) {
+                    ThreadStartArg *arg_iter = (ThreadStartArg *)iter->thread_arg;
+                    int32 tid_iter = arg_iter ? arg_iter->thread_id : 0x3fffffff;
+                    set_restored_tls_tid(iter, tid_iter);
+                }
+            }
             printf("========all threads restore done\n");
             wasm_cluster_send_signal_all(exec_env->cluster, 0);
             // wasm_cluster_wake_up_threads(exec_env->cluster);
@@ -1916,6 +1998,10 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                 perror("Error:wasm_interp_func_bytecode:frame is NULL\n");
                 return;
             }
+            /* Restore TLS tid for this thread */
+            set_restored_tls_tid(exec_env, thread_arg->thread_id);
+            log_tls_tid(exec_env, "worker-after-tidset");
+            fflush(stdout);
             // debug_wasm_interp_frame(frame, module->e->functions);
 
             cur_func = frame->function;
@@ -1940,6 +2026,15 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                 perror("failed to restore\n");
                 return;
             }
+            /* tls_base may have been adjusted inside wasm_restore_tls, so
+             * rewrite tid with the correct base before continuing. */
+            set_restored_tls_tid(exec_env, cur_thread_arg->thread_id);
+            /* After globals/TLS have been restored, log the current TLS base
+             * and tid to confirm per-thread values are recovered. */
+            log_tls_tid(exec_env, "worker-after-restore");
+            printf("[worker restore] id=%d after wasm_restore pthread=%lu\n",
+                   cur_thread_arg->thread_id, (unsigned long)pthread_self());
+            fflush(stdout);
             frame_ip = dummy_ip;
             frame_lp = dummy_lp;
             frame_sp = dummy_sp;

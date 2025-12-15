@@ -8,6 +8,7 @@
 #include "wasm_export.h"
 #include "wasm_runtime_common.h"
 #include "wasmtime_ssp.h"
+#include <pthread.h>
 
 #if WASM_ENABLE_THREAD_MGR != 0
 #include "../../../thread-mgr/thread_manager.h"
@@ -202,6 +203,9 @@ wasi_clock_time_get(wasm_exec_env_t exec_env,
                     wasi_timestamp_t precision, /* uint64 precision */
                     wasi_timestamp_t *time /* uint64 *time */)
 {
+    printf("[wasi_clock_time_get] tid=%lu clock_id=%u precision=%llu\n",
+           (unsigned long)pthread_self(), (unsigned)clock_id,
+           (unsigned long long)precision);
     wasm_module_inst_t module_inst = get_module_inst(exec_env);
 
     if (!validate_native_addr(time, (uint64)sizeof(wasi_timestamp_t)))
@@ -635,6 +639,8 @@ wasi_fd_write(wasm_exec_env_t exec_env, wasi_fd_t fd,
               const iovec_app_t *iovec_app, uint32 iovs_len,
               uint32 *nwritten_app)
 {
+    printf("[wasi_fd_write] tid=%lu fd=%u iovs_len=%u\n",
+           (unsigned long)pthread_self(), (unsigned)fd, iovs_len);
     wasm_module_inst_t module_inst = get_module_inst(exec_env);
     wasi_ctx_t wasi_ctx = get_wasi_ctx(module_inst);
     struct fd_table *curfds = wasi_ctx_get_curfds(wasi_ctx);
@@ -982,10 +988,25 @@ get_timeout_for_poll_oneoff(const wasi_subscription_t *in,
 
     for (i = 0; i < nsubscriptions; ++i) {
         const __wasi_subscription_t *s = &in[i];
+        /* debug: dump clock subscription fields to track restore issues */
+        if (s->u.type == __WASI_EVENTTYPE_CLOCK) {
+            printf("[poll_oneoff] sub[%u] timeout=%llu flags=0x%x clock_id=%u\n",
+                   i,
+                   (unsigned long long)s->u.u.clock.timeout,
+                   (unsigned)s->u.u.clock.flags,
+                   (unsigned)s->u.u.clock.clock_id);
+        }
         if (s->u.type == __WASI_EVENTTYPE_CLOCK
             && (s->u.u.clock.flags & __WASI_SUBSCRIPTION_CLOCK_ABSTIME) == 0) {
             timeout = min_uint64(timeout, s->u.u.clock.timeout);
         }
+    }
+    /* Failsafe: if the timeout looks absurdly large (e.g., bogus after
+     * checkpoint/restore), clamp it to 3s to avoid 10+ minute sleeps. */
+    if (timeout != (__wasi_timestamp_t)-1 && timeout > 10ULL * 1000000000ULL) {
+        printf("[poll_oneoff] timeout clamped from %llu to 3000000000\n",
+               (unsigned long long)timeout);
+        timeout = 3000000000ULL;
     }
     return timeout;
 }
@@ -1011,6 +1032,8 @@ execute_interruptible_poll_oneoff(
     const __wasi_subscription_t *in, __wasi_event_t *out, size_t nsubscriptions,
     size_t *nevents, wasm_exec_env_t exec_env)
 {
+    printf("[poll_oneoff] tid=%lu nsubs=%zu enter\n",
+           (unsigned long)pthread_self(), (size_t)nsubscriptions);
     if (nsubscriptions == 0) {
         *nevents = 0;
         return __WASI_ESUCCESS;
@@ -1037,11 +1060,17 @@ execute_interruptible_poll_oneoff(
     bh_memcpy_s(in_copy, size_to_copy, in, size_to_copy);
 
     while (timeout == (__wasi_timestamp_t)-1 || elapsed <= timeout) {
+        printf("[poll_oneoff] tid=%lu elapsed=%llu timeout=%llu\n",
+               (unsigned long)pthread_self(),
+               (unsigned long long)elapsed,
+               (unsigned long long)timeout);
         /* update timeout for clock subscription events */
         update_clock_subscription_data(
             in_copy, nsubscriptions, min_uint64(time_quant, timeout - elapsed));
         err = wasmtime_ssp_poll_oneoff(exec_env, curfds, in_copy, out,
                                        nsubscriptions, nevents);
+        printf("[poll_oneoff] tid=%lu ssp_ret=%u nevents=%zu\n",
+               (unsigned long)pthread_self(), (unsigned)err, *nevents);
         elapsed += time_quant;
 
         if (err) {
@@ -1050,6 +1079,8 @@ execute_interruptible_poll_oneoff(
         }
 
         if (wasm_cluster_is_thread_terminated(exec_env)) {
+            printf("[poll_oneoff] tid=%lu detected thread terminated flag\n",
+                   (unsigned long)pthread_self());
             wasm_runtime_free(in_copy);
             return __WASI_EINTR;
         }
@@ -1079,6 +1110,14 @@ wasi_poll_oneoff(wasm_exec_env_t exec_env, const wasi_subscription_t *in,
                  wasi_event_t *out, uint32 nsubscriptions, uint32 *nevents_app)
 {
     wasm_module_inst_t module_inst = get_module_inst(exec_env);
+    /* Translate native pointers to app offsets for debugging; -1 if outside */
+    int32 in_off = wasm_runtime_addr_native_to_app(module_inst, (void *)in);
+    int32 out_off = wasm_runtime_addr_native_to_app(module_inst, (void *)out);
+    printf("[wasi_poll_oneoff] tid=%lu nsubs=%u in_ptr=0x%lx(off=%d) "
+           "out_ptr=0x%lx(off=%d)\n",
+           (unsigned long)pthread_self(), nsubscriptions,
+           (unsigned long)(uintptr_t)in, in_off,
+           (unsigned long)(uintptr_t)out, out_off);
     wasi_ctx_t wasi_ctx = get_wasi_ctx(module_inst);
     struct fd_table *curfds = wasi_ctx_get_curfds(wasi_ctx);
     size_t nevents = 0;
@@ -1099,6 +1138,8 @@ wasi_poll_oneoff(wasm_exec_env_t exec_env, const wasi_subscription_t *in,
     err = execute_interruptible_poll_oneoff(curfds, in, out, nsubscriptions,
                                             &nevents, exec_env);
 #endif
+    printf("[wasi_poll_oneoff] tid=%lu exit err=%u nevents=%zu\n",
+           (unsigned long)pthread_self(), (unsigned)err, nevents);
     if (err)
         return err;
 

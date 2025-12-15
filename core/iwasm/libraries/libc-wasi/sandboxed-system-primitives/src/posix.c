@@ -22,6 +22,7 @@
 #include "refcount.h"
 #include "rights.h"
 #include "str.h"
+#include <pthread.h>
 
 /* Some platforms (e.g. Windows) already define `min()` macro.
  We're undefing it here to make sure the `min` call does exactly
@@ -2062,6 +2063,13 @@ wasmtime_ssp_poll_oneoff(wasm_exec_env_t exec_env, struct fd_table *curfds,
 #else
     // Sleeping.
     if (nsubscriptions == 1 && in[0].u.type == __WASI_EVENTTYPE_CLOCK) {
+        fprintf(stderr,
+                "[ssp_poll_oneoff] tid=%lu clock timeout=%llu flags=0x%x "
+                "clock_id=%u\n",
+                (unsigned long)pthread_self(),
+                (unsigned long long)in[0].u.u.clock.timeout,
+                (unsigned)in[0].u.u.clock.flags,
+                (unsigned)in[0].u.u.clock.clock_id);
         out[0] = (__wasi_event_t){
             .userdata = in[0].userdata,
             .type = in[0].u.type,
@@ -2071,6 +2079,11 @@ wasmtime_ssp_poll_oneoff(wasm_exec_env_t exec_env, struct fd_table *curfds,
         if (wasi_clockid_to_clockid(in[0].u.u.clock.clock_id, &clock_id)) {
             struct timespec ts;
             convert_timestamp(in[0].u.u.clock.timeout, &ts);
+            fprintf(stderr,
+                    "[ssp_poll_oneoff] tid=%lu calling clock_nanosleep "
+                    "sec=%ld nsec=%ld\n",
+                    (unsigned long)pthread_self(), (long)ts.tv_sec,
+                    (long)ts.tv_nsec);
             int ret = clock_nanosleep(
                 clock_id,
                 (in[0].u.u.clock.flags & __WASI_SUBSCRIPTION_CLOCK_ABSTIME) != 0
@@ -2079,6 +2092,10 @@ wasmtime_ssp_poll_oneoff(wasm_exec_env_t exec_env, struct fd_table *curfds,
                 &ts, NULL);
             if (ret != 0)
                 out[0].error = convert_errno(ret);
+            fprintf(stderr,
+                    "[ssp_poll_oneoff] tid=%lu clock_nanosleep ret=%d err=%u\n",
+                    (unsigned long)pthread_self(), ret,
+                    (unsigned)out[0].error);
         }
         else {
             out[0].error = __WASI_ENOTSUP;
@@ -2137,6 +2154,9 @@ wasmtime_ssp_poll_oneoff(wasm_exec_env_t exec_env, struct fd_table *curfds,
         *nevents = 1;
         if (out[0].error != 0)
             return convert_errno(out[0].error);
+        fprintf(stderr,
+                "[ssp_poll_oneoff] tid=%lu sleep done err=%u nevents=1\n",
+                (unsigned long)pthread_self(), (unsigned)out[0].error);
         return 0;
     }
 

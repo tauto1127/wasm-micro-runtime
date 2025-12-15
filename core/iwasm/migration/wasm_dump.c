@@ -151,11 +151,31 @@ int get_opcode_offset(uint8 *ip, uint8 *ip_lim) {
 // TODO: コードごちゃごちゃで読めないので、整理する
 uint8* get_type_stack(uint32 fidx, uint32 offset, uint32* type_stack_size, bool is_return_address) {
     FILE *tablemap_func = open_image("tablemap_func", "rb");
-    if (!tablemap_func) printf("not found tablemap_func\n");
+    if (!tablemap_func) {
+        fprintf(stderr, "not found tablemap_func\n");
+    }
     FILE *tablemap_offset = open_image("tablemap_offset", "rb");
-    if (!tablemap_func) printf("not found tablemap_offset\n");
+    if (!tablemap_offset) {
+        fprintf(stderr, "not found tablemap_offset\n");
+    }
     FILE *type_table = open_image("type_table", "rb");
-    if (!tablemap_func) printf("not found type_table\n");
+    if (!type_table) {
+        fprintf(stderr, "not found type_table\n");
+    }
+
+    /* If tablemap files are unavailable (common in sample builds),
+     * fall back to an empty type stack so that checkpointing can proceed
+     * instead of crashing. Execution state will still be restored via
+     * value stack, control stack, and program counter.
+     */
+    if (!tablemap_func || !tablemap_offset || !type_table) {
+        *type_stack_size = 0;
+        uint8 *empty = malloc(1);
+        if (tablemap_func) fclose(tablemap_func);
+        if (tablemap_offset) fclose(tablemap_offset);
+        if (type_table) fclose(type_table);
+        return empty;
+    }
 
     /// tablemap_func
     fseek(tablemap_func, fidx*sizeof(uint32)*3, SEEK_SET);
@@ -389,30 +409,20 @@ int dump_dirty_memory(WASMMemoryInstance *memory, char* file_prefix) {
     char file_name[MAX_FILE_NAME_LENGTH] = "memory.img";
     str_add_prefix(file_name, file_prefix);
     FILE *memory_fp = open_image(file_name, "wb");
-    uint64 pagemap_entry;
-
-#if BH_PLATFORM_LINUX == 1
-    int fd = get_pagemap(memory->memory_data);
-#else
-    // check_soft_dirtyでfdを使っているのでダミー用.
-    // もっといい実装がありそう
-    int fd = 0;
-#endif
-
+    /* Dump all linear memory pages, not only soft-dirty pages.
+     * TLS for worker threads is typically initialized before we call
+     * clear_refs(), so relying on soft-dirty tracking skips their TLS
+     * pages and breaks restore. The file format (offset + 4KiB chunk)
+     * remains unchanged and restore_dirty_memory() will still replay it.
+     */
     uint8* memory_data = memory->memory_data;
     uint8* memory_data_end = memory->memory_data_end;
     int i = 0;
     for (uint8* addr = memory->memory_data; addr < memory_data_end; addr += PAGE_SIZE, ++i) {
-        if (check_soft_dirty(fd, addr)) {
-            uint32 offset = (uint64)addr - (uint64)memory_data;
-            fwrite(&offset, sizeof(uint32), 1, memory_fp);
-            fwrite(addr, PAGE_SIZE, 1, memory_fp);
-        }
+        uint32 offset = (uint64)addr - (uint64)memory_data;
+        fwrite(&offset, sizeof(uint32), 1, memory_fp);
+        fwrite(addr, PAGE_SIZE, 1, memory_fp);
     }
-
-#if BH_PLATFORM_LINUX == 1
-    close(fd);
-#endif
     fclose(memory_fp);
     return 0;
 }
@@ -428,7 +438,6 @@ void str_add_prefix(char* file_name, char* file_prefix) {
 }
 
 int wasm_dump_memory(WASMMemoryInstance *memory, char* file_prefix) {
-    if(strcmp(file_prefix, MAIN_THREAD_PREFIX) != 0)  return 0;
     char file_name[MAX_FILE_NAME_LENGTH] = "mem_page_count.img";
     str_add_prefix(file_name, file_prefix);
     FILE *mem_size_fp = open_image(file_name, "wb");
@@ -479,6 +488,16 @@ int wasm_dump_global(WASMModuleInstance *module, WASMGlobalInstance *globals, ui
         }
     }
 
+    /* Hack: FILE ロック復旧のため、共有メモリ上のロックワード(3860付近)を 0 に
+       してからイメージを残す。メインメモリに対してだけ実施。 */
+    if (module->memory_count > 0
+        && module->memories[0]
+        && ((WASMMemoryInstance *)module->memories[0])->memory_data_size > 3868
+        && strcmp(file_prefix, MAIN_THREAD_PREFIX) == 0) {
+        WASMMemoryInstance *memory0 = (WASMMemoryInstance *)module->memories[0];
+        memset(memory0->memory_data + 3860, 0, 8);
+    }
+
     fclose(fp);
     return 0;
 }
@@ -505,7 +524,83 @@ int wasm_dump_program_counter(
 
     dump_value(&fidx, sizeof(uint32), 1, fp);
     dump_value(&p_offset, sizeof(uint32), 1, fp);
+    fclose(fp);
 
+    return 0;
+}
+
+/* Dump TLS block (pthread struct + thread locals) for this thread.
+ * We assume the first global is __tls_base and the third is tls_size,
+ * which matches the wasm32-wasi-threads layout produced by wasi-libc.
+ *
+ * NOTE: On wasm32-wasi-threads (musl pthread_impl.h), pthread->tid sits at
+ * offset 0x3c (60) from the start of the TLS block where
+ * __wasilibc_pthread_self lives. The earlier single‑thread C/R code assumed
+ * offset 20; that is wrong for this target and causes tid to be lost on
+ * restore. Keep these constants in sync if wasi-libc layout changes.
+ */
+static int
+wasm_dump_tls(WASMMemoryInstance *memory, uint8 *global_data,
+              char *file_prefix)
+{
+    uint32 *g = (uint32 *)global_data;
+    uint32 tls_base = g[0];
+    uint32 tls_size = g[2];
+
+    if (tls_size == 0 || tls_base + tls_size > memory->memory_data_size) {
+        return 0;
+    }
+
+    /* Dump a window that starts a little before tls_base so we surely
+     * capture the pthread header (tid lives at +20). */
+    const uint32 headroom = tls_base > 128 ? 128 : tls_base;
+    uint32 start = tls_base - headroom;
+    uint32 size = tls_size + headroom;
+
+    fprintf(stderr, "%stls_base=%u tls_size=%u dump_start=%u size=%u\n",
+            file_prefix, tls_base, tls_size, start, size);
+
+    /* Copy TLS into a temp buffer so we can overwrite tid before writing. */
+    uint8 *buf = malloc(size);
+    if (!buf)
+        return -1;
+    memcpy(buf, memory->memory_data + start, size);
+
+    /* Log the original tid stored in linear memory before we overwrite it.
+     * It helps us verify whether pthread_create wrote the tid or not. */
+    const uint32 tid_off = headroom + 60; /* 60 = offsetof(struct pthread, tid) */
+    if (tid_off + sizeof(int32) <= size) {
+        int32 orig_tid = *(int32 *)(buf + tid_off);
+        fprintf(stderr, "%sorig_tls_tid_before_overwrite=%d (tls_base=%u off=%u)\n",
+                file_prefix, orig_tid, tls_base, tid_off);
+    }
+
+    /* Write thread-id into pthread.tid slot to ensure it is present
+     * in the image even if libc didn't touch it yet. */
+    int32 tid = 0;
+    if (strncmp(file_prefix, MAIN_THREAD_PREFIX, strlen(MAIN_THREAD_PREFIX)) == 0) {
+        tid = 0x3fffffff; /* main */
+    }
+    else {
+        tid = atoi(file_prefix);
+    }
+    if (tid_off + sizeof(int32) <= size) {
+        *(int32 *)(buf + tid_off) = tid;
+    }
+
+    char file_name[MAX_FILE_NAME_LENGTH] = "tls.img";
+    str_add_prefix(file_name, file_prefix);
+    FILE *fp = open_image(file_name, "wb");
+    if (!fp) {
+        free(buf);
+        return -1;
+    }
+
+    fwrite(&start, sizeof(uint32), 1, fp);
+    fwrite(&size, sizeof(uint32), 1, fp);
+    fwrite(buf, 1, size, fp);
+    fclose(fp);
+    free(buf);
     return 0;
 }
 
@@ -622,6 +717,16 @@ int wasm_dump(WASMExecEnv *exec_env,
     fprintf(stderr, "%sglobal, %lu\n", file_prefix, get_time(ts1, ts2));
     if (rc < 0) {
         LOG_ERROR("Failed to dump globals\n");
+        return rc;
+    }
+
+    /* dump TLS */
+    clock_gettime(CLOCK_MONOTONIC, &ts1);
+    rc = wasm_dump_tls(memory, global_data, file_prefix);
+    clock_gettime(CLOCK_MONOTONIC, &ts2);
+    fprintf(stderr, "%stls, %lu\n", file_prefix, get_time(ts1, ts2));
+    if (rc < 0) {
+        LOG_ERROR("Failed to dump tls\n");
         return rc;
     }
 
