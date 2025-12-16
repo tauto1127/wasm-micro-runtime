@@ -42,6 +42,80 @@
 #include <signal.h>
 #include <wasm_shared_memory.h>
 
+typedef struct RestoreSyncArgs {
+    int waiting_thread_count;
+    int *waiting_thread_ids;
+    WASMExecEnv *main_exec_env;
+} RestoreSyncArgs;
+
+static void *
+restore_sync_routine(void *arg)
+{
+    RestoreSyncArgs *args = (RestoreSyncArgs *)arg;
+    WASMExecEnv *main_exec_env = args->main_exec_env;
+    WASMCluster *cluster = main_exec_env->cluster;
+    int waiting_thread_count = args->waiting_thread_count;
+    int *waiting_thread_ids = args->waiting_thread_ids;
+
+    // Wait for the main thread to enter the waiting state to avoid race condition
+    while (main_exec_env->current_status->running_status != STATUS_STOP) {
+        usleep(100); // Sleep for a very short time
+    }
+
+    // 1. Wake up/continue specific threads (especially waiting ones)
+    WASMExecEnv *current_exec_env = bh_list_first_elem(&cluster->exec_env_list);
+    while (current_exec_env) {
+        ThreadStartArg *thread_arg = (ThreadStartArg *)current_exec_env->thread_arg;
+        if (thread_arg) { // sub thread
+            printf("waking up thread %d: %lu\n", thread_arg->thread_id, pthread_self());
+        }
+        else{
+            printf("waking up thread main!!\n");
+        }
+        int* p = waiting_thread_ids;
+        // チェックポイントした待機中スレッドのスレッドidをループ
+        while (*p) {
+            printf("*p : %d\n", *p);
+            if (thread_arg == NULL) {
+                if(*p == -1) {
+                    printf("this is main thread\n");
+                    wasm_cluster_thread_continue(current_exec_env);
+                    break;
+                }
+            } else  {
+                if(thread_arg->thread_id == *p) {
+                    printf("this thread was waiting: %d\n", thread_arg->thread_id);
+                    wasm_cluster_thread_continue(current_exec_env);
+                    break;
+                }
+            }
+            p++;
+        }
+        current_exec_env = bh_list_elem_next(current_exec_env);
+    }
+
+    // 2. Wait until waiting threads are actually waiting again
+    while(true) {
+        int current_waiting_count = wasm_cluster_get_waiting_thread_count(cluster);
+        printf("current_waiting_count: %d, waiting_thread_count: %d\n", current_waiting_count, waiting_thread_count);
+        if (current_waiting_count == waiting_thread_count) {
+            break;
+        }
+        usleep(1000); // Sleep for 1ms
+    }
+    printf("done waiting threads run!\n");
+
+    // 3. Continue all other (non-waiting) threads, including the main thread
+    wasm_cluster_thread_continue_all(cluster);
+    wasm_shared_memory_wake_waiters();
+
+    // 4. Clean up
+    wasm_runtime_free(args->waiting_thread_ids);
+    wasm_runtime_free(args);
+
+    return NULL;
+}
+
 typedef int32 CellType_I32;
 typedef int64 CellType_I64;
 typedef float32 CellType_F32;
@@ -1901,35 +1975,26 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
             }
             os_mutex_unlock(&counter->lock);
             printf("========all threads restore done\n");
-            wasm_cluster_send_signal_all(exec_env->cluster, 0);
-            WASMExecEnv *current_exec_env = bh_list_first_elem(&exec_env->cluster->exec_env_list);
-            while (current_exec_env) {
-                ThreadStartArg *thread_arg = (ThreadStartArg *)current_exec_env->thread_arg;
-                printf("waking up thread %d: %lu\n", thread_arg->thread_id, pthread_self());
-                int* p = waiting_thread_ids;
-                while (*p != -1) {
-                    if (thread_arg->thread_id == *p) {
-                        printf("this thread was waiting: %d\n", thread_arg->thread_id);
-                        wasm_cluster_thread_continue(current_exec_env);
-                        break;
-                    }
-                    p++;
-                }
-                current_exec_env = bh_list_elem_next(current_exec_env);
+            // Create a helper thread to manage thread synchronization and wakeup
+            RestoreSyncArgs *args = wasm_runtime_malloc(sizeof(RestoreSyncArgs));
+            if (!args) {
+                perror("Failed to allocate memory for RestoreSyncArgs");
+                return;
             }
-            // wasm_cluster_wake_up_threads(exec_env->cluster);
-            // ここで待機スレッドが全て待機するまで待つ
-            while(true) {
-                int current_waiting_count = wasm_cluster_get_waiting_thread_count(exec_env->cluster);
-                printf("current_waiting_count: %d, waiting_thread_count: %d\n", current_waiting_count, waiting_thread_count);
-                if (current_waiting_count == waiting_thread_count) {
-                    break;
-                }
-                usleep(1000);
-            }
+            args->main_exec_env = exec_env;
+            args->waiting_thread_count = waiting_thread_count;
+            args->waiting_thread_ids = waiting_thread_ids;
 
-            wasm_cluster_thread_continue_all(exec_env->cluster);
-            wasm_shared_memory_wake_waiters();
+            korp_thread sync_thread_id;
+            if (os_thread_create(&sync_thread_id, restore_sync_routine, args,
+                APP_THREAD_STACK_SIZE_DEFAULT) != 0) {
+                perror("Failed to create restore sync thread");
+                wasm_runtime_free(args);
+                return;
+            }
+            wasm_cluster_thread_waiting_run(exec_env);
+            printf("main thread wake up!\n");
+
             FETCH_OPCODE_AND_DISPATCH();
         } else {
             printf("メインスレッドじゃない: %lu and SIG_RESTORE\n", pthread_self());
