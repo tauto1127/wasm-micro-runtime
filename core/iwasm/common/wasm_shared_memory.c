@@ -5,10 +5,12 @@
 
 #include "bh_log.h"
 #include "platform_api_vmcore.h"
+#include "wasm_export.h"
 #include "wasm_shared_memory.h"
 #include "bh_hashmap.h"
 #if WASM_ENABLE_THREAD_MGR != 0
 #include "../libraries/thread-mgr/thread_manager.h"
+#include "../libraries/lib-wasi-threads/lib_wasi_threads_wrapper.h"
 #endif
 
 /*
@@ -60,6 +62,15 @@ destroy_wait_info(void *wait_info);
 #if WASM_ENABLE_THREAD_MGR != 0
 static void
 wait_count_cb(void *key, void *value, void *user_data);
+
+static void
+wait_tid_collect_cb(void *key, void *value, void *user_data);
+
+typedef struct WaitTidCollectCtx {
+    int *tids;
+    int idx;
+    int cap;
+} WaitTidCollectCtx;
 #endif
 
 bool
@@ -271,7 +282,6 @@ wasm_runtime_atomic_wait(WASMModuleInstanceCommon *module, void *address,
 
     bh_assert(module->module_type == Wasm_Module_Bytecode
               || module->module_type == Wasm_Module_AoT);
-    printf("wait called \n");
 
     if (wasm_copy_exception(module_inst, NULL)) {
         return -1;
@@ -409,8 +419,6 @@ wasm_runtime_atomic_notify(WASMModuleInstanceCommon *module, void *address,
     korp_mutex *lock;
     bool out_of_bounds;
 
-    printf("notify called\n");
-
     bh_assert(module->module_type == Wasm_Module_Bytecode
               || module->module_type == Wasm_Module_AoT);
 
@@ -505,6 +513,67 @@ get_wait_node_count(void)
     os_mutex_unlock(&g_shared_memory_lock);
 
     return (int)total;
+}
+
+int *
+get_wait_node_tids(void)
+{
+    int count = 0;
+    int *tids = NULL;
+    WaitTidCollectCtx ctx;
+
+    os_mutex_lock(&g_shared_memory_lock);
+    if (wait_map) {
+        bh_hash_map_traverse(wait_map, wait_count_cb, &count);
+    }
+
+    /* +1 for the -2 sentinel */
+    tids = wasm_runtime_malloc(sizeof(int) * (uint32)(count + 1));
+    if (!tids) {
+        os_mutex_unlock(&g_shared_memory_lock);
+        return NULL;
+    }
+
+    ctx.tids = tids;
+    ctx.idx = 0;
+    ctx.cap = count;
+
+    if (wait_map && count > 0) {
+        bh_hash_map_traverse(wait_map, wait_tid_collect_cb, &ctx);
+    }
+    os_mutex_unlock(&g_shared_memory_lock);
+
+    tids[ctx.idx] = -2;
+
+    return tids;
+}
+
+static void
+wait_tid_collect_cb(void *key, void *value, void *user_data)
+{
+    (void)key;
+    AtomicWaitInfo *info = (AtomicWaitInfo *)value;
+    AtomicWaitNode *node = bh_list_first_elem(info->wait_list);
+    WaitTidCollectCtx *ctx = user_data;
+
+    while (node && ctx->idx < ctx->cap) {
+        int tid = -1;
+
+        if (node->exec_env && node->exec_env->thread_arg) {
+            ThreadStartArg *arg = (ThreadStartArg *)node->exec_env->thread_arg;
+            tid = arg->thread_id;
+        }
+
+        ctx->tids[ctx->idx++] = tid;
+        node = bh_list_elem_next(node);
+    }
+}
+
+/* Backward compatibility helper used by thread_manager.c */
+int *
+get_wait_node_ids(void)
+{
+    return get_wait_node_tids();
 }
 
 uint32

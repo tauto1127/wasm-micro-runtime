@@ -16,6 +16,9 @@
 #define BH_PLATFORM_LINUX 0
 #if WASM_ENABLE_FAST_INTERP == 0
 
+int* wait_thread_ids = NULL;
+int wait_thread_ids_count = 0;
+
 static char *image_dir = ".";
 void set_image_dir(char* dir)
 {
@@ -553,6 +556,11 @@ int wasm_dump_thread_states(WASMExecEnv *exec_env, char* file_prefix) {
         dump_value(ids, sizeof(int), count, fp);
         wasm_runtime_free(ids);
 
+        // 待機中スレッド一覧の保存
+        printf("待機中スレッド一覧の保存をdump_valueで行います．数；%d\n", wait_thread_ids_count);
+        dump_value(wait_thread_ids, sizeof(int), wait_thread_ids_count, fp);
+        wasm_runtime_free(wait_thread_ids);
+
         return 0;
     }
 
@@ -723,6 +731,15 @@ signal_control_routine(void *arg)
                 // }
             };
             os_mutex_unlock(&counter->lock);
+            printf("======waitしているスレッド一覧をダンプします========\n");
+            wait_thread_ids = wasm_cluster_get_waiting_thread_ids(cluster);
+            wait_thread_ids_count = waits;
+            printf("done");
+            if (wait_thread_ids) {
+                for (int *p = wait_thread_ids; *p != -2; ++p) {
+                    printf("waiting thread id: %d\n", *p);
+                }
+            }
             printf("======waiting threadを起こします=========\n");
 
             // =====スレッド同時停止======

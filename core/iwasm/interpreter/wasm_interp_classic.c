@@ -1376,6 +1376,7 @@ wasm_interp_call_func_import(WASMModuleInstance *module_inst,
         thread_id_ch = get_file_prefix(thread_id);\
         printf("%sThread checkpoint started\n", thread_id_ch);\
     }else { \
+        /* メインスレッド*/\
         thread_id_ch = get_file_prefix(-1);\
         printf("%sThread %s checkpoint started\n", thread_id_ch);\
     }\

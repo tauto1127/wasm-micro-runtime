@@ -1070,10 +1070,16 @@ int* wasm_cluster_get_thread_ids(WASMCluster *cluster) {
     return thread_ids;
 }
 
+// 終端：-2, メインスレッド:-1
 int
 wasm_cluster_get_waiting_thread_count(WASMCluster *cluster)
 {
     return get_wait_node_count();
+}
+
+int*
+wasm_cluster_get_waiting_thread_ids(WASMCluster *cluster) {
+    return get_wait_node_ids();
 }
 
 void

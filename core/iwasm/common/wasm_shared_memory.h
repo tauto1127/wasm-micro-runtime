@@ -64,6 +64,8 @@ uint32
 wasm_shared_memory_wake_waiters(void);
 // wait_mapを取得するための関数
 int get_wait_node_count();
+int *get_wait_node_tids(void);
+int *get_wait_node_ids(void);
 #endif
 
 #ifdef __cplusplus

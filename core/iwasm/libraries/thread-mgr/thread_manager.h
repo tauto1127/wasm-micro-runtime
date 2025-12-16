@@ -241,6 +241,9 @@ void wasm_cluster_reset_checkpointing_counter(WASMCluster *cluster);
 int
 wasm_cluster_get_waiting_thread_count(WASMCluster *cluster);
 
+int *
+wasm_cluster_get_waiting_thread_ids(WASMCluster *cluster);
+
 void
 wasm_cluster_wake_up_threads(WASMCluster *cluster);
 
