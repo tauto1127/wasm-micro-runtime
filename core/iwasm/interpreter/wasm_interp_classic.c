@@ -1801,7 +1801,17 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
             int to_read = dump_thread_count > 0 ? dump_thread_count - 1 : 0;
             fread(thread_ids, sizeof(int), to_read, thread_state_fp);
             thread_ids[to_read] = -1; /* 終端 */
+
+            /* 待機中スレッドを読み込む */
+            int waiting_thread_count = 0;
+            fread(&waiting_thread_count, sizeof(int), 1, thread_state_fp);
+            int* waiting_thread_ids = wasm_runtime_malloc(sizeof(int) * waiting_thread_count);
+            fread(waiting_thread_ids, sizeof(int), waiting_thread_count, thread_state_fp);
             fclose(thread_state_fp);
+            printf("waiting_thread_ids:\n");
+            for(int i = 0; i < waiting_thread_count; i++) {
+                printf("waiting_thread_ids[%d]: %d\n", i, waiting_thread_ids[i]);
+            }
 
             // tid_allocatorの復元
             restore_thread_id(thread_ids, thread_count - 1);
@@ -1892,7 +1902,32 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
             os_mutex_unlock(&counter->lock);
             printf("========all threads restore done\n");
             wasm_cluster_send_signal_all(exec_env->cluster, 0);
+            WASMExecEnv *current_exec_env = bh_list_first_elem(&exec_env->cluster->exec_env_list);
+            while (current_exec_env) {
+                ThreadStartArg *thread_arg = (ThreadStartArg *)current_exec_env->thread_arg;
+                printf("waking up thread %d: %lu\n", thread_arg->thread_id, pthread_self());
+                int* p = waiting_thread_ids;
+                while (*p != -1) {
+                    if (thread_arg->thread_id == *p) {
+                        printf("this thread was waiting: %d\n", thread_arg->thread_id);
+                        wasm_cluster_thread_continue(current_exec_env);
+                        break;
+                    }
+                    p++;
+                }
+                current_exec_env = bh_list_elem_next(current_exec_env);
+            }
             // wasm_cluster_wake_up_threads(exec_env->cluster);
+            // ここで待機スレッドが全て待機するまで待つ
+            while(true) {
+                int current_waiting_count = wasm_cluster_get_waiting_thread_count(exec_env->cluster);
+                printf("current_waiting_count: %d, waiting_thread_count: %d\n", current_waiting_count, waiting_thread_count);
+                if (current_waiting_count == waiting_thread_count) {
+                    break;
+                }
+                usleep(1000);
+            }
+
             wasm_cluster_thread_continue_all(exec_env->cluster);
             wasm_shared_memory_wake_waiters();
             FETCH_OPCODE_AND_DISPATCH();
