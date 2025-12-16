@@ -558,6 +558,7 @@ int wasm_dump_thread_states(WASMExecEnv *exec_env, char* file_prefix) {
 
         // 待機中スレッド一覧の保存
         printf("待機中スレッド一覧の保存をdump_valueで行います．数；%d\n", wait_thread_ids_count);
+        dump_value(&wait_thread_ids_count, sizeof(int), 1, fp);
         dump_value(wait_thread_ids, sizeof(int), wait_thread_ids_count, fp);
         wasm_runtime_free(wait_thread_ids);
 
