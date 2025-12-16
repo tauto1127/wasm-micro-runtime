@@ -199,3 +199,59 @@ allowed to reach their wait state, and only then are normal threads started.
 3. Wait for all Phase 1 threads to enter wait state (polling `get_wait_node_count()`)
 4. **Phase 2**: Start remaining normal threads
 5. This ensures waiting threads reach their wait state before normal threads start executing
+
+---
+
+## Investigation: Bank Account Simulator Deadlock
+
+### Goal
+Investigate a deadlock that occurs when restoring the `bank.c` multi-threaded application from a checkpoint.
+
+### Application Source
+- **Working Directory:** `/home/takuto1127/wamr-2.1.0-with-wasi-threads/wasm-sample/bank/`
+- **Source File:** `bank.c`
+
+### Build Instructions
+
+1.  **Compile to WASM:**
+    ```sh
+    cd /home/takuto1127/wamr-2.1.0-with-wasi-threads/wasm-sample/bank/
+    /opt/wasi-sdk-21/bin/clang --sysroot /home/takuto1127/wasi-libc/sysroot \
+        --target=wasm32-wasi-threads -pthread \
+        -Wl,--import-memory,--export-memory,--max-memory=67108864 \
+        bank.c -o bank.wasm
+    ```
+
+2.  **Generate Stack Tables (Required for Checkpoint):**
+    ```sh
+    cd /home/takuto1127/wamr-2.1.0-with-wasi-threads/wasm-sample/bank/
+    /home/takuto1127/Code/Wacret/target/release/wacret create bank.wasm
+    ```
+    *(Note: This command creates `tablemap_func`, `tablemap_offset`, and `type_table` files in the current directory.)*
+
+### Execution Commands
+
+**Normal Execution:**
+```sh
+cd /home/takuto1127/wamr-2.1.0-with-wasi-threads/wasm-sample/bank/
+~/wamr-2.1.0-with-wasi-threads/product-mini/platforms/linux/build/iwasm \
+  --max-threads=10 \
+  bank.wasm
+```
+
+**Execution with Restore:**
+```sh
+cd /home/takuto1127/wamr-2.1.0-with-wasi-threads/wasm-sample/bank/
+~/wamr-2.1.0-with-wasi-threads/product-mini/platforms/linux/build/iwasm \
+  --max-threads=10 \
+  --restore \
+  bank.wasm
+```
+
+### Current Hypothesis
+The deadlock is caused by the C/R mechanism not saving/restoring the state of native `pthread_mutex_t` locks. This leads to undefined behavior when a restored thread attempts to unlock a mutex it no longer owns, corrupting the mutex and causing deadlocks.
+
+### Current Status
+- **Reproducible**: Yes
+- **Root cause identified**: Highly likely (Mutex state C/R)
+- **Next focus**: Confirm hypothesis by adding diagnostics to `bank.c` to log errors from `pthread_mutex_unlock`.

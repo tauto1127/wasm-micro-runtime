@@ -3,12 +3,14 @@
  * SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
  */
 
+#include "bh_hashmap.h"
 #include "platform_api_extension.h"
 #include "platform_api_vmcore.h"
 #include <string.h>
 #include <time.h>
 #include "platform_common.h"
 #include "tid_allocator.h"
+#include "wasm_c_api_internal.h"
 #include "wasm_interp.h"
 #include "bh_log.h"
 #include "wasm_runtime.h"
@@ -75,16 +77,13 @@ restore_sync_routine(void *arg)
         int* p = waiting_thread_ids;
         // チェックポイントした待機中スレッドのスレッドidをループ
         while (*p) {
-            printf("*p : %d\n", *p);
             if (thread_arg == NULL) {
                 if(*p == -1) {
-                    printf("this is main thread\n");
                     wasm_cluster_thread_continue(current_exec_env);
                     break;
                 }
             } else  {
                 if(thread_arg->thread_id == *p) {
-                    printf("this thread was waiting: %d\n", thread_arg->thread_id);
                     wasm_cluster_thread_continue(current_exec_env);
                     break;
                 }
@@ -1995,6 +1994,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
             wasm_cluster_thread_waiting_run(exec_env);
             printf("main thread wake up!\n");
 
+            printf("線形メモリ：%p\n", memory->memory_data);
             FETCH_OPCODE_AND_DISPATCH();
         } else {
             printf("メインスレッドじゃない: %lu and SIG_RESTORE\n", pthread_self());
@@ -2053,8 +2053,11 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
             UPDATE_ALL_FROM_FRAME();
             printf("%d done checkpoint\n", cur_thread_arg->thread_id);
             wasm_cluster_increase_checkpointing_counter(exec_env->cluster);
+            printf("[waiting_run enter] tid=%d host=%lu\n", cur_thread_arg->thread_id, (unsigned long)pthread_self());
             wasm_cluster_thread_waiting_run(exec_env);                 \
+            printf("[waiting_run end] tid=%d host=%lu\n", cur_thread_arg->thread_id, (unsigned long)pthread_self());
             printf("%d: thread run\n", cur_thread_arg->thread_id);
+            printf("線形メモリ：%p\n", memory->memory_data);
             FETCH_OPCODE_AND_DISPATCH();
         }
     }
@@ -2094,7 +2097,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
 
                 /* No frame found with exception handler; validation should
                  * catch it */
-                bh_assert(frame_csp >= frame->csp_bottom + relative_depth);
+
 
                 /* go up the frame stack */
                 WASMBranchBlock *tgtframe = (frame_csp - 1) - relative_depth;
@@ -6427,9 +6430,25 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                         CHECK_MEMORY_OVERFLOW(4);
                         CHECK_ATOMIC_MEMORY_ACCESS();
 
+
+                        ThreadStartArg* arg = exec_env->thread_arg;
+                        int tid = -1;
+                        if(arg != NULL) {
+                            tid = arg->thread_id;
+                        }
+
+                        HashMap* wait_map =get_wait_map();
+
+                        uint8 *base = memory ? memory->memory_data : NULL;
+                        uintptr_t off = (base && maddr) ? (uintptr_t)((uint8*)maddr - base) : 0;
+                        uint32 cur = maddr ? *(uint32*)maddr : 0;
+
+
                         ret = wasm_runtime_atomic_notify(
                             (WASMModuleInstanceCommon *)module, maddr,
                             notify_count);
+
+                        printf("[notify] tid=%d off=0x%lx count=%u res=%u\n", tid, off, notify_count, ret);
                         if (ret == (uint32)-1)
                             goto got_exception;
 
@@ -6447,11 +6466,28 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                         CHECK_MEMORY_OVERFLOW(4);
                         CHECK_ATOMIC_MEMORY_ACCESS();
 
+                        ThreadStartArg* arg = exec_env->thread_arg;
+                        int tid = -1;
+                        if(arg != NULL) {
+                            tid = arg->thread_id;
+                        }
+
+                        HashMap* wait_map =get_wait_map();
+
+                        uint8 *base = memory ? memory->memory_data : NULL;
+                        uintptr_t off = (base && maddr) ? (uintptr_t)((uint8*)maddr - base) : 0;
+                        uint32 cur = maddr ? *(uint32*)maddr : 0;
+
+                        printf("[wait32] tid=%d module=%p mem=%p base=%p wait_map=%p maddr=%p off=0x%lx cur=%u expect=%u timeout=%llu\n",
+                               tid, module, memory, base, wait_map, maddr, (unsigned long)off, cur, expect,
+                               (unsigned long long)timeout);
+
                         ret = wasm_runtime_atomic_wait(
                             (WASMModuleInstanceCommon *)module, maddr,
                             (uint64)expect, timeout, false);
                         if (ret == (uint32)-1)
                             goto got_exception;
+                        // printf("atomic_wait done return: %u\n", ret);
 
 #if WASM_ENABLE_THREAD_MGR != 0
                         CHECK_SUSPEND_FLAGS();

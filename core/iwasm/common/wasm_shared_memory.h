@@ -22,6 +22,9 @@ wasm_shared_memory_init();
 void
 wasm_shared_memory_destroy();
 
+HashMap *
+get_wait_map(void);
+
 uint16
 shared_memory_inc_reference(WASMMemoryInstance *memory);
 

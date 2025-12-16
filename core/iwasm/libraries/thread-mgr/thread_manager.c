@@ -1115,15 +1115,23 @@ void
 wasm_cluster_thread_continue_all(WASMCluster *cluster)
 {
     WASMExecEnv *exec_env = bh_list_first_elem(&cluster->exec_env_list);
+    os_mutex_lock(&cluster->lock);
     while (exec_env) {
+        ThreadStartArg *arg = (ThreadStartArg *)exec_env->thread_arg;
+        if(arg !=NULL ){
+        }
         wasm_cluster_thread_continue(exec_env);
         exec_env = bh_list_elem_next(exec_env);
     }
+    os_mutex_unlock(&cluster->lock);
 }
 
 void
 wasm_cluster_thread_continue(WASMExecEnv *exec_env)
 {
+    if(exec_env->current_status->running_status != STATUS_STOP) {
+        return;
+    }
     os_mutex_lock(&exec_env->wait_lock);
     wasm_cluster_clear_thread_signal(exec_env);
     exec_env->current_status->running_status = STATUS_RUNNING;
