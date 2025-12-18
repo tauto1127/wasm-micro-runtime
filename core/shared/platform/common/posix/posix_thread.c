@@ -9,6 +9,10 @@
 #include "platform_api_vmcore.h"
 #include "platform_api_extension.h"
 
+#if defined(__linux__) && defined(__x86_64__)
+#include <ucontext.h>
+#endif
+
 #if defined(__APPLE__) || defined(__MACH__)
 #include <TargetConditionals.h>
 #endif
@@ -587,6 +591,19 @@ mask_signals(int how)
 static struct sigaction prev_sig_act_SIGSEGV;
 static struct sigaction prev_sig_act_SIGBUS;
 
+static bool
+siglog_enabled(void)
+{
+    static bool inited;
+    static bool enabled;
+
+    if (!inited) {
+        enabled = getenv("WAMR_SIGLOG") != NULL;
+        inited = true;
+    }
+    return enabled;
+}
+
 /*
  * ASAN is not designed to work with custom stack unwind or other low-level
  * things. Ignore a function that does some low-level magic. (e.g. walking
@@ -603,6 +620,28 @@ signal_callback(int sig_num, siginfo_t *sig_info, void *sig_ucontext)
 
     mask_signals(SIG_BLOCK);
 
+    if (siglog_enabled()) {
+        static __thread int siglog_count;
+        if (siglog_count < 4) {
+#if defined(__linux__) && defined(__x86_64__)
+            /* Best-effort: extract RIP/RSP from ucontext for debugging.
+             * Note: this is for diagnostics only. */
+            ucontext_t *uc = (ucontext_t *)sig_ucontext;
+            void *rip = NULL, *rsp = NULL;
+            if (uc) {
+                rip = (void *)uc->uc_mcontext.gregs[REG_RIP];
+                rsp = (void *)uc->uc_mcontext.gregs[REG_RSP];
+            }
+            fprintf(stderr, "[siglog] pthread=%lu sig=%d addr=%p rip=%p rsp=%p\n",
+                    (unsigned long)pthread_self(), sig_num, sig_addr, rip, rsp);
+#else
+            fprintf(stderr, "[siglog] pthread=%lu sig=%d addr=%p\n",
+                    (unsigned long)pthread_self(), sig_num, sig_addr);
+#endif
+            siglog_count++;
+        }
+    }
+
     /* Try to handle signal with the registered signal handler */
     if (signal_handler && (sig_num == SIGSEGV || sig_num == SIGBUS)) {
         signal_handler(sig_addr);
@@ -615,7 +654,15 @@ signal_callback(int sig_num, siginfo_t *sig_info, void *sig_ucontext)
 
     /* Forward the signal to next handler if found */
     if (prev_sig_act && (prev_sig_act->sa_flags & SA_SIGINFO)) {
-        prev_sig_act->sa_sigaction(sig_num, sig_info, sig_ucontext);
+        /* sa_sigaction shares the same union as sa_handler.  Some programs
+         * may have SIG_DFL/SIG_IGN (or NULL) in this slot even if SA_SIGINFO
+         * is set; calling it would jump to address 0/1 and re-trigger SIGSEGV.
+         */
+        if ((void *)prev_sig_act->sa_sigaction
+            && (void *)prev_sig_act->sa_sigaction != SIG_DFL
+            && (void *)prev_sig_act->sa_sigaction != SIG_IGN) {
+            prev_sig_act->sa_sigaction(sig_num, sig_info, sig_ucontext);
+        }
     }
     else if (prev_sig_act
              && prev_sig_act->sa_handler

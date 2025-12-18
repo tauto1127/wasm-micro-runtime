@@ -1,3 +1,6 @@
+#ifndef _LIB_WASI_THREADS_WRAPPER_H_
+#define _LIB_WASI_THREADS_WRAPPER_H_
+
 #include "platform_common.h"
 #include "wasm_export.h"
 typedef struct {
@@ -16,3 +19,5 @@ void deallocate_thread_id(int32 thread_id);
 void restore_thread_id(int32* thread_id, uint32 size);
 
 void *thread_start(void *arg);
+
+#endif /* _LIB_WASI_THREADS_WRAPPER_H_ */

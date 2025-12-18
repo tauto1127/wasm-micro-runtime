@@ -8,6 +8,37 @@
 #include "platform_api_extension.h"
 #include "platform_api_vmcore.h"
 #include "platform_common.h"
+#include <stdlib.h>
+#include <errno.h>
+#if WASM_ENABLE_THREAD_MGR != 0
+#include "../libraries/lib-wasi-threads/lib_wasi_threads_wrapper.h"
+#endif
+
+static bool
+clusterlog_enabled(void)
+{
+    static bool inited;
+    static bool enabled;
+
+    if (!inited) {
+        enabled = getenv("WAMR_CLUSTERLOG") != NULL;
+        inited = true;
+    }
+    return enabled;
+}
+
+static bool
+exclog_enabled(void)
+{
+    static bool inited;
+    static bool enabled;
+
+    if (!inited) {
+        enabled = getenv("WAMR_EXCLOG") != NULL;
+        inited = true;
+    }
+    return enabled;
+}
 #include "wasm_exec_env.h"
 #include "wasm_export.h"
 #include <signal.h>
@@ -677,6 +708,15 @@ thread_manager_start_routine(void *arg)
     os_cond_signal(&exec_env->wait_cond);
     os_mutex_unlock(&exec_env->wait_lock);
 
+    if (clusterlog_enabled()) {
+        ThreadStartArg *thread_arg = (ThreadStartArg *)exec_env->thread_arg;
+        int32 thread_id = thread_arg ? thread_arg->thread_id : -1;
+        fprintf(stderr,
+                "[clusterlog thread_start] exec_env=%p module_inst=%p cluster=%p cluster_lock=%p handle=%lu thread_id=%d thread_arg=%p\n",
+                exec_env, module_inst, cluster, &cluster->lock,
+                (unsigned long)exec_env->handle, thread_id, exec_env->thread_arg);
+    }
+
     ret = exec_env->thread_start_routine(exec_env);
 
 #ifdef OS_ENABLE_HW_BOUND_CHECK
@@ -791,10 +831,25 @@ wasm_cluster_create_thread(WASMExecEnv *exec_env,
 
     os_mutex_lock(&new_exec_env->wait_lock);
 
+    uint32 stack_size = APP_THREAD_STACK_SIZE_DEFAULT;
+    {
+        const char *env = getenv("WAMR_NATIVE_STACK_SIZE");
+        if (env && env[0]) {
+            char *endp = NULL;
+            errno = 0;
+            unsigned long v = strtoul(env, &endp, 10);
+            if (errno == 0 && endp && *endp == '\0' && v > 0) {
+                stack_size = (uint32)v;
+                if (stack_size < APP_THREAD_STACK_SIZE_MIN)
+                    stack_size = APP_THREAD_STACK_SIZE_MIN;
+            }
+        }
+    }
+
     if (0
         != os_thread_create(&tid, thread_manager_start_routine,
                             (void *)new_exec_env,
-                            APP_THREAD_STACK_SIZE_DEFAULT)) {
+                            stack_size)) {
         os_mutex_unlock(&new_exec_env->wait_lock);
         goto fail3;
     }
@@ -1549,6 +1604,15 @@ wasm_cluster_set_exception(WASMExecEnv *exec_env, const char *exception)
     const bool has_exception = exception != NULL;
     WASMCluster *cluster = wasm_exec_env_get_cluster(exec_env);
     bh_assert(cluster);
+
+    if (exclog_enabled()) {
+        ThreadStartArg *thread_arg = (ThreadStartArg *)exec_env->thread_arg;
+        int32 thread_id = thread_arg ? thread_arg->thread_id : -1;
+        fprintf(stderr,
+                "[exclog set_exception] exec_env=%p cluster=%p cluster_lock=%p thread_id=%d has_exception=%d msg=%s\n",
+                exec_env, cluster, &cluster->lock, thread_id,
+                has_exception ? 1 : 0, exception ? exception : "(clear)");
+    }
 
     struct spread_exception_data data;
     data.skip = NULL;

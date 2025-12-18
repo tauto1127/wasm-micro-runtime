@@ -3286,13 +3286,7 @@ call_wasm_with_hw_bound_check(WASMModuleInstance *module_inst,
     char exception[EXCEPTION_BUF_LEN];
 #endif
     bool ret = true;
-
-    /* Check native stack overflow firstly to ensure we have enough
-       native stack to run the following codes before actually calling
-       the aot function in invokeNative function. */
-    if (!wasm_runtime_detect_native_stack_overflow(exec_env)) {
-        return;
-    }
+    bool tls_set = false;
 
     if (!exec_env_tls) {
         if (!os_thread_signal_inited()) {
@@ -3300,16 +3294,31 @@ call_wasm_with_hw_bound_check(WASMModuleInstance *module_inst,
             return;
         }
 
-        /* Set thread handle and stack boundary if they haven't been set */
+        /* Set thread handle and stack boundary for this thread.
+         *
+         * Note: exec_env (and its native_stack_boundary) may come from a
+         * restored checkpoint, where native pointers are stale.  Initialize
+         * thread info before stack overflow checks.
+         */
         wasm_exec_env_set_thread_info(exec_env);
 
         wasm_runtime_set_exec_env_tls(exec_env);
+        tls_set = true;
+        exec_env_tls = exec_env;
     }
     else {
         if (exec_env_tls != exec_env) {
             wasm_set_exception(module_inst, "invalid exec env");
             return;
         }
+    }
+
+    /* Check native stack overflow after thread info is initialized. */
+    if (!wasm_runtime_detect_native_stack_overflow(exec_env)) {
+        if (tls_set) {
+            wasm_runtime_set_exec_env_tls(NULL);
+        }
+        return;
     }
 
     wasm_exec_env_push_jmpbuf(exec_env, &jmpbuf_node);

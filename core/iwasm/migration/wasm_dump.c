@@ -253,9 +253,24 @@ _dump_stack(WASMExecEnv *exec_env, struct WASMInterpFrame *frame, FILE *fp, bool
     fwrite(type_stack_from_file, sizeof(uint8), type_stack_size_from_file, fp);
     free(type_stack_from_file);
 
-    // 値スタックの中身
+    /*
+     * 値スタックのサイズ/中身
+     *
+     * 以前は restore 側で「type stack から value_stack_size を再計算」していたが、
+     * tablemap/type_table のズレや stackmap の誤りがあるとサイズが一致せず、
+     * 以降の ctrl stack の読み出し位置がずれて CSP が破壊される。
+     *
+     * ここでは「実際に積まれている value stack size（cell 数）」を dump し、
+     * restore 側は原則それを使って value stack を復元する。
+     *
+     * 互換性のため、マーカーを入れて旧フォーマットも読めるようにする。
+     */
     uint32 local_cell_num = func->param_cell_num + func->local_cell_num;
     uint32 value_stack_size = frame->sp - frame->sp_bottom;
+    /* 'VSTK' */
+    const uint32 value_stack_marker = 0x5653544B;
+    fwrite(&value_stack_marker, sizeof(uint32), 1, fp);
+    fwrite(&value_stack_size, sizeof(uint32), 1, fp);
     fwrite(frame->lp, sizeof(uint32), local_cell_num, fp);
     fwrite(frame->sp_bottom, sizeof(uint32), value_stack_size, fp);
 
@@ -267,12 +282,28 @@ _dump_stack(WASMExecEnv *exec_env, struct WASMInterpFrame *frame, FILE *fp, bool
     WASMBranchBlock *csp = frame->csp_bottom;
     uint32 addr;
     uint8* ip_start = wasm_get_func_code(frame->function);
+    uint8* ip_end = wasm_get_func_code_end(frame->function);
+    bool csplog = getenv("WAMR_CSPLOG") != NULL;
     for (i = 0; i < ctrl_stack_size; ++i, ++csp) {
         // uint8 *begin_addr;
+        if (csplog && csp->begin_addr && ip_start && ip_end
+            && !(csp->begin_addr >= ip_start && csp->begin_addr < ip_end)) {
+            fprintf(stderr,
+                    "[csplog dump] func_idx=%u idx=%d begin_addr=%p out_of_range ip_start=%p ip_end=%p\n",
+                    (uint32)(frame->function - module->e->functions), i,
+                    csp->begin_addr, ip_start, ip_end);
+        }
         addr = get_addr_offset(csp->begin_addr, ip_start);
         fwrite(&addr, sizeof(uint32), 1, fp);
 
         // uint8 *target_addr;
+        if (csplog && csp->target_addr && ip_start && ip_end
+            && !(csp->target_addr >= ip_start && csp->target_addr < ip_end)) {
+            fprintf(stderr,
+                    "[csplog dump] func_idx=%u idx=%d target_addr=%p out_of_range ip_start=%p ip_end=%p\n",
+                    (uint32)(frame->function - module->e->functions), i,
+                    csp->target_addr, ip_start, ip_end);
+        }
         addr = get_addr_offset(csp->target_addr, ip_start);
         fwrite(&addr, sizeof(uint32), 1, fp);
 

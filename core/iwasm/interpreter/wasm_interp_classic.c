@@ -43,12 +43,229 @@
 #include <pthread.h>
 #include <signal.h>
 #include <wasm_shared_memory.h>
+#include <stdlib.h>
 
 typedef struct RestoreSyncArgs {
     int waiting_thread_count;
     int *waiting_thread_ids;
     WASMExecEnv *main_exec_env;
 } RestoreSyncArgs;
+
+int get_env_int(const char *env_var, int default_value);
+
+static bool
+clusterlog_enabled(void)
+{
+    static bool inited;
+    static bool enabled;
+
+    if (!inited) {
+        enabled = getenv("WAMR_CLUSTERLOG") != NULL;
+        inited = true;
+    }
+    return enabled;
+}
+
+static bool
+restore_pclog_enabled(void)
+{
+    static bool inited;
+    static bool enabled;
+
+    if (!inited) {
+        enabled = getenv("WAMR_RESTORE_PCLOG") != NULL;
+        inited = true;
+    }
+    return enabled;
+}
+
+static bool
+nulldispatchlog_enabled(void)
+{
+    static bool inited;
+    static bool enabled;
+
+    if (!inited) {
+        enabled = getenv("WAMR_NULLDISPLOG") != NULL;
+        inited = true;
+    }
+    return enabled;
+}
+
+static bool
+iprangecheck_enabled(void)
+{
+    static bool inited;
+    static bool enabled;
+
+    if (!inited) {
+        enabled = getenv("WAMR_IPRANGELOG") != NULL;
+        inited = true;
+    }
+    return enabled;
+}
+
+static bool
+tracebuf_enabled(void)
+{
+    static bool inited;
+    static bool enabled;
+
+    if (!inited) {
+        enabled = getenv("WAMR_TRACEBUF") != NULL;
+        inited = true;
+    }
+    return enabled;
+}
+
+typedef struct TraceEntry {
+    uint32 dispatch_count;
+    uint32 func_idx;
+    uint8 opcode;
+    uint8 safe_ip;
+    uint16 signal;
+    uintptr_t ip_off;
+    uint8 *ip;
+    uint8 *ip_in_frame;
+    uint8 *ip_end;
+} TraceEntry;
+
+#define TRACEBUF_SIZE 2048
+
+typedef struct TraceBuf {
+    uint32 pos;
+    uint32 filled;
+    bool dumped;
+    TraceEntry entries[TRACEBUF_SIZE];
+} TraceBuf;
+
+static __thread TraceBuf g_tracebuf;
+
+static void
+tracebuf_push(uint32 dispatch_count, uint32 func_idx, uint8 opcode, bool safe_ip,
+              uint16 signal, uintptr_t ip_off, uint8 *ip, uint8 *ip_in_frame,
+              uint8 *ip_end)
+{
+    TraceBuf *tb = &g_tracebuf;
+    TraceEntry *e = &tb->entries[tb->pos % TRACEBUF_SIZE];
+    e->dispatch_count = dispatch_count;
+    e->func_idx = func_idx;
+    e->opcode = opcode;
+    e->safe_ip = safe_ip ? 1 : 0;
+    e->signal = signal;
+    e->ip_off = ip_off;
+    e->ip = ip;
+    e->ip_in_frame = ip_in_frame;
+    e->ip_end = ip_end;
+    tb->pos++;
+    if (tb->filled < TRACEBUF_SIZE)
+        tb->filled++;
+}
+
+static void
+tracebuf_dump(WASMExecEnv *exec_env, WASMModuleInstance *module,
+              WASMFunctionInstance *cur_func, WASMInterpFrame *frame,
+              uint8 *frame_ip, uint8 *frame_ip_end, const char *reason)
+{
+    if (!tracebuf_enabled())
+        return;
+
+    TraceBuf *tb = &g_tracebuf;
+    if (tb->dumped)
+        return;
+    tb->dumped = true;
+
+    ThreadStartArg *thread_arg = (ThreadStartArg *)exec_env->thread_arg;
+    int32 thread_id = thread_arg ? thread_arg->thread_id : -1;
+
+    uint32 func_idx = (uint32)(cur_func - module->e->functions);
+    uint8 *code = wasm_get_func_code(cur_func);
+    uint8 *code_end = wasm_get_func_code_end(cur_func);
+
+    int dump_n = get_env_int("WAMR_TRACEBUF_DUMP", 256);
+    if (dump_n < 1)
+        dump_n = 1;
+    if ((uint32)dump_n > tb->filled)
+        dump_n = (int)tb->filled;
+
+    fprintf(stderr,
+            "[tracebuf] reason=%s tid=%d func_idx=%u ip=%p ip_in_frame=%p ip_end=%p code=%p code_end=%p entries=%u dump_n=%d\n",
+            reason ? reason : "unknown", thread_id, func_idx, frame_ip,
+            frame ? frame->ip : NULL, frame_ip_end, code, code_end, tb->filled,
+            dump_n);
+
+    uint32 start = tb->pos >= (uint32)dump_n ? tb->pos - (uint32)dump_n : 0;
+    for (uint32 i = start; i < tb->pos; i++) {
+        TraceEntry *e = &tb->entries[i % TRACEBUF_SIZE];
+        fprintf(stderr,
+                "[tracebuf] #%u dc=%u func=%u op=0x%02x safe=%u sig=%u ip=%p ip_in_frame=%p ip_end=%p ip_off=%lu\n",
+                i, e->dispatch_count, e->func_idx, (unsigned)e->opcode,
+                (unsigned)e->safe_ip, (unsigned)e->signal, e->ip,
+                e->ip_in_frame, e->ip_end, (unsigned long)e->ip_off);
+    }
+}
+
+static void
+log_ip_owner_func(WASMModuleInstance *module, uint8 *ip)
+{
+    if (!module || !module->e || !ip)
+        return;
+
+    WASMFunctionInstance *funcs = module->e->functions;
+    uint32 func_count = module->e->function_count;
+
+    for (uint32 i = 0; i < func_count; i++) {
+        WASMFunctionInstance *f = funcs + i;
+        if (!f || f->is_import_func)
+            continue;
+
+        uint8 *code = wasm_get_func_code(f);
+        uint8 *code_end = wasm_get_func_code_end(f);
+        if (!code || !code_end)
+            continue;
+
+        if (ip >= code && ip < code_end) {
+            fprintf(stderr,
+                    "[ipowner] ip=%p belongs_to_func_idx=%u code=%p code_end=%p ip_off=%lu\n",
+                    ip, i, code, code_end,
+                    (unsigned long)(uintptr_t)(ip - code));
+            return;
+        }
+    }
+
+    fprintf(stderr, "[ipowner] ip=%p belongs_to_func_idx=none\n", ip);
+}
+
+static void
+log_restored_pc(WASMExecEnv *exec_env, WASMModuleInstance *module,
+                WASMFunctionInstance *cur_func, uint8 *frame_ip,
+                uint8 *frame_ip_end)
+{
+    if (!restore_pclog_enabled())
+        return;
+
+    ThreadStartArg *thread_arg = (ThreadStartArg *)exec_env->thread_arg;
+    int32 thread_id = thread_arg ? thread_arg->thread_id : -1;
+
+    uint8 *code = wasm_get_func_code(cur_func);
+    uint8 *code_end = wasm_get_func_code_end(cur_func);
+    uintptr_t ip_off = 0;
+    bool in_range = false;
+
+    if (code && code_end && frame_ip) {
+        if (frame_ip >= code && frame_ip < code_end) {
+            in_range = true;
+            ip_off = (uintptr_t)(frame_ip - code);
+        }
+    }
+
+    fprintf(stderr,
+            "[restore_pclog] tid=%d func_idx=%u is_import=%d ip=%p ip_end=%p code=%p code_end=%p in_range=%d ip_off=%lu\n",
+            thread_id, (uint32)(cur_func - module->e->functions),
+            cur_func->is_import_func ? 1 : 0, frame_ip, frame_ip_end, code,
+            code_end,
+            in_range ? 1 : 0, (unsigned long)ip_off);
+}
 
 static void *
 restore_sync_routine(void *arg)
@@ -58,6 +275,13 @@ restore_sync_routine(void *arg)
     WASMCluster *cluster = main_exec_env->cluster;
     int waiting_thread_count = args->waiting_thread_count;
     int *waiting_thread_ids = args->waiting_thread_ids;
+
+    if (clusterlog_enabled()) {
+        fprintf(stderr,
+                "[clusterlog restore_sync] self=%lu main_exec_env=%p cluster=%p cluster_lock=%p waiting_thread_count=%d waiting_thread_ids=%p\n",
+                (unsigned long)pthread_self(), main_exec_env, cluster,
+                &cluster->lock, waiting_thread_count, waiting_thread_ids);
+    }
 
     // Wait for the main thread to enter the waiting state to avoid race condition
     while (main_exec_env->current_status->running_status != STATUS_STOP) {
@@ -121,12 +345,12 @@ restore_sync_routine(void *arg)
     // }
     // Phase1/2 完了後の無限ループ部を少しだけ強くする
     int counter = 0;
-while (counter++ < 600) {
-    wasm_cluster_wake_up_threads(cluster);   // wait_map 内を全 signal
-    wasm_shared_memory_wake_waiters();       // 念のため明示的に waiters 全解除
-    os_usleep(5000);                         // 5ms くらい小休止
-    // printf("restore_sync_routine: wake up all threads\n");
-}
+// while (counter++ < 600) {
+//     wasm_cluster_wake_up_threads(cluster);   // wait_map 内を全 signal
+//     wasm_shared_memory_wake_waiters();       // 念のため明示的に waiters 全解除
+//     os_usleep(5000);                         // 5ms くらい小休止
+//     // printf("restore_sync_routine: wake up all threads\n");
+// }
 printf("restore_sync_routine: finished wake up all threads\n");
 
     // 4. Clean up
@@ -1637,7 +1861,10 @@ int ckpt_point = -1;
 #define CHECK_DUMP()                                                        \
     dispatch_count++;                                                       \
     if (IS_WAMR_CHECKPOINT_SIG(exec_env->current_status->signal_flag)) {\
-        CHECKPOINT_THREADS();\
+        /* wasm_cluster_thread_waiting_run() expects wait_lock held */       \
+        os_mutex_lock(&exec_env->wait_lock);                                \
+        CHECKPOINT_THREADS();                                               \
+        os_mutex_unlock(&exec_env->wait_lock);                              \
     }\
     // if (wasm_get_checkpoint() || dispatch_count == ckpt_point) {            \
     //     DO_CHECKPOINT();                                                    \
@@ -1647,6 +1874,121 @@ int ckpt_point = -1;
 #define FETCH_OPCODE_AND_DISPATCH()                                     \
 do {                                                                    \
     CHECK_DUMP()                                                        \
+    if (tracebuf_enabled()) {                                           \
+        uint8 *__code = wasm_get_func_code(cur_func);                   \
+        uint8 *__code_end = wasm_get_func_code_end(cur_func);           \
+        bool __safe = false;                                            \
+        uintptr_t __ip_off = 0;                                         \
+        uint8 __op = 0xff;                                              \
+        if (__code && __code_end && frame_ip                            \
+            && frame_ip >= __code && frame_ip < __code_end) {           \
+            __safe = true;                                              \
+            __ip_off = (uintptr_t)(frame_ip - __code);                  \
+            __op = *frame_ip;                                           \
+        }                                                               \
+        tracebuf_push((uint32)dispatch_count,                           \
+                      (uint32)(cur_func - module->e->functions),        \
+                      __op, __safe,                                     \
+                      (uint16)exec_env->current_status->signal_flag,    \
+                      __ip_off, frame_ip, frame ? frame->ip : NULL,     \
+                      frame_ip_end);                                    \
+    }                                                                   \
+    if (iprangecheck_enabled()) {                                       \
+        static __thread bool __last_inited;                              \
+        static __thread uint8 *__last_ip;                                \
+        static __thread uint8 __last_opcode;                             \
+        static __thread uint32 __last_func_idx;                          \
+        static __thread uint8 *__last_code;                              \
+        static __thread uint8 *__last_code_end;                          \
+        uint8 *__code = wasm_get_func_code(cur_func);                   \
+        uint8 *__code_end = wasm_get_func_code_end(cur_func);           \
+        if (__code && __code_end && frame_ip                             \
+            && frame_ip >= __code && frame_ip < __code_end) {            \
+            __last_inited = true;                                        \
+            __last_ip = frame_ip;                                        \
+            __last_opcode = *frame_ip;                                   \
+            __last_func_idx = (uint32)(cur_func - module->e->functions); \
+            __last_code = __code;                                        \
+            __last_code_end = __code_end;                                \
+        }                                                               \
+        else {                                                           \
+            static __thread int __iprange_log_count;                    \
+            if (__iprange_log_count < 4) {                              \
+                ThreadStartArg *__thread_arg =                          \
+                    (ThreadStartArg *)exec_env->thread_arg;             \
+                int32 __thread_id = __thread_arg ? __thread_arg->thread_id : -1; \
+                uintptr_t __ip_off = 0;                                 \
+                int __in_range = 0;                                     \
+                if (__code && __code_end && frame_ip                    \
+                    && frame_ip >= __code && frame_ip < __code_end) {   \
+                    __in_range = 1;                                     \
+                    __ip_off = (uintptr_t)(frame_ip - __code);          \
+                }                                                       \
+                fprintf(stderr,                                         \
+                        "[iprange] tid=%d func_idx=%u ip=%p code=%p code_end=%p in_range=%d ip_off=%lu dispatch_count=%d signal=%u frame_ip_in_frame=%p\n", \
+                        __thread_id,                                    \
+                        (uint32)(cur_func - module->e->functions),      \
+                        frame_ip, __code, __code_end,                   \
+                        __in_range, (unsigned long)__ip_off,            \
+                        dispatch_count,                                  \
+                        (unsigned)exec_env->current_status->signal_flag, \
+                        frame ? frame->ip : NULL);                       \
+                if (__last_inited) {                                    \
+                    unsigned long __last_ip_off = 0;                    \
+                    if (__last_code && __last_ip && __last_ip >= __last_code) { \
+                        __last_ip_off =                                 \
+                            (unsigned long)(uintptr_t)(__last_ip - __last_code); \
+                    }                                                   \
+                    fprintf(stderr,                                     \
+                            "[iprange_prev] func_idx=%u ip=%p ip_off=%lu opcode=0x%02x code=%p code_end=%p\n", \
+                            __last_func_idx, __last_ip, __last_ip_off,  \
+                            (unsigned)__last_opcode, __last_code,       \
+                            __last_code_end);                           \
+                }                                                       \
+                log_ip_owner_func(module, frame_ip);                    \
+                __iprange_log_count++;                                  \
+            }                                                           \
+            tracebuf_dump(exec_env, module, cur_func, frame, frame_ip,   \
+                          frame_ip_end, "iprange");                     \
+            wasm_set_exception(module, "frame ip out of range");        \
+            goto got_exception;                                         \
+        }                                                               \
+    }                                                                   \
+    if (nulldispatchlog_enabled()) {                                    \
+        uint8 __op = *frame_ip;                                         \
+        const void *__target = handle_table[__op];                      \
+        if (!__target) {                                                \
+            static __thread int __nulldisp_log_count;                   \
+            if (__nulldisp_log_count < 4) {                             \
+                ThreadStartArg *__thread_arg =                          \
+                    (ThreadStartArg *)exec_env->thread_arg;             \
+                int32 __thread_id = __thread_arg ? __thread_arg->thread_id : -1; \
+                uint8 *__code = wasm_get_func_code(cur_func);           \
+                uint8 *__code_end = wasm_get_func_code_end(cur_func);   \
+                bool __in_range = false;                                \
+                uintptr_t __ip_off = 0;                                 \
+                if (__code && __code_end && frame_ip                    \
+                    && frame_ip >= __code && frame_ip < __code_end) {   \
+                    __in_range = true;                                  \
+                    __ip_off = (uintptr_t)(frame_ip - __code);          \
+                }                                                       \
+	                fprintf(stderr,                                         \
+	                        "[nulldisp] tid=%d func_idx=%u opcode=0x%02x ip=%p code=%p code_end=%p in_range=%d ip_off=%lu\n", \
+	                        __thread_id,                                    \
+	                        (uint32)(cur_func - module->e->functions),      \
+	                        (unsigned)__op, frame_ip, __code, __code_end,   \
+	                        __in_range ? 1 : 0, (unsigned long)__ip_off);   \
+	                log_ip_owner_func(module, frame_ip);                    \
+	                __nulldisp_log_count++;                                 \
+	            }                                                           \
+	            tracebuf_dump(exec_env, module, cur_func, frame, frame_ip,   \
+	                          frame_ip_end, "nulldisp");                    \
+	            wasm_set_exception(module, "null dispatch target");         \
+	            goto got_exception;                                         \
+	        }                                                               \
+	        frame_ip++;                                                     \
+	        goto *__target;                                                 \
+	    }                                                                   \
     goto *handle_table[*frame_ip++];                                    \
 } while(0);
 
@@ -2009,12 +2351,16 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                 wasm_runtime_free(args);
                 return;
             }
+            /* wasm_cluster_thread_waiting_run() expects wait_lock held */
+            os_mutex_lock(&exec_env->wait_lock);
             wasm_cluster_thread_waiting_run(exec_env);
+            os_mutex_unlock(&exec_env->wait_lock);
             printf("main thread wake up!\n");
 
             printf("線形メモリ：memory_data: %p, memory_end: %p\n", memory->memory_data, memory->memory_data + memory->memory_data_size);
             printf("main thread run\n");
             fprintf(stderr, "main thread run\n");
+            log_restored_pc(exec_env, module, cur_func, frame_ip, frame_ip_end);
             FETCH_OPCODE_AND_DISPATCH();
         } else {
             printf("メインスレッドじゃない: %lu and SIG_RESTORE\n", pthread_self());
@@ -2074,11 +2420,15 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
             printf("%d done restore\n", cur_thread_arg->thread_id);
             wasm_cluster_increase_checkpointing_counter(exec_env->cluster);
             printf("[waiting_run enter] tid=%d host=%lu\n", cur_thread_arg->thread_id, (unsigned long)pthread_self());
-            wasm_cluster_thread_waiting_run(exec_env);                 \
+            /* wasm_cluster_thread_waiting_run() expects wait_lock held */
+            os_mutex_lock(&exec_env->wait_lock);
+            wasm_cluster_thread_waiting_run(exec_env);
+            os_mutex_unlock(&exec_env->wait_lock);
             printf("[waiting_run end] tid=%d host=%lu\n", cur_thread_arg->thread_id, (unsigned long)pthread_self());
             printf("%d: thread run\n", cur_thread_arg->thread_id);
             fprintf(stderr, "%d: thread run\n", cur_thread_arg->thread_id);
             printf("線形メモリ：memory_data: %p, memory_end: %p\n", memory->memory_data, memory->memory_data + memory->memory_data_size);
+            log_restored_pc(exec_env, module, cur_func, frame_ip, frame_ip_end);
             FETCH_OPCODE_AND_DISPATCH();
         }
     }
@@ -2657,6 +3007,41 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                         goto got_exception;
                     }
                     frame_ip = end_addr;
+                }
+                if (getenv("WAMR_BRLOG")) {
+                    uint8 *__code = wasm_get_func_code(cur_func);
+                    uint8 *__code_end = wasm_get_func_code_end(cur_func);
+                    if (frame_ip && __code && __code_end
+                        && !(frame_ip >= __code && frame_ip < __code_end)) {
+                        ThreadStartArg *__thread_arg =
+                            (ThreadStartArg *)exec_env->thread_arg;
+                        int32 __thread_id =
+                            __thread_arg ? __thread_arg->thread_id : -1;
+                        fprintf(stderr,
+                                "[brlog] tid=%d func_idx=%u depth=%u target_ip=%p out_of_range code=%p code_end=%p\n",
+                                __thread_id,
+                                (uint32)(cur_func - module->e->functions),
+                                depth, frame_ip, __code, __code_end);
+                        if (frame_csp && frame && frame->csp_bottom) {
+                            uint32 __csp_depth =
+                                (uint32)(frame_csp - frame->csp_bottom);
+                            fprintf(stderr,
+                                    "[brlog] csp_depth=%u csp=%p csp_bottom=%p\n",
+                                    __csp_depth, frame_csp, frame->csp_bottom);
+                            if (__csp_depth > 0) {
+                                WASMBranchBlock *__lbl = frame_csp - 1;
+                                fprintf(stderr,
+                                        "[brlog] top_label begin=%p target=%p frame_sp=%p cell_num=%u\n",
+                                        __lbl->begin_addr, __lbl->target_addr,
+                                        __lbl->frame_sp, __lbl->cell_num);
+                            }
+                        }
+                        tracebuf_dump(exec_env, module, cur_func, frame,
+                                      frame_ip, frame_ip_end,
+                                      "br_target_oob");
+                        wasm_set_exception(module, "br target out of range");
+                        goto got_exception;
+                    }
                 }
                 HANDLE_OP_END();
             }
@@ -6843,6 +7228,32 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
 #endif
 #if WASM_ENABLE_LABELS_AS_VALUES == 0
             default:
+                if (getenv("WAMR_BADOPLOG")) {
+                    static __thread int badop_log_count;
+                    if (badop_log_count < 4) {
+                        ThreadStartArg *thread_arg =
+                            (ThreadStartArg *)exec_env->thread_arg;
+                        int32 thread_id =
+                            thread_arg ? thread_arg->thread_id : -1;
+                        uint8 *code = wasm_get_func_code(cur_func);
+                        uint8 *code_end = wasm_get_func_code_end(cur_func);
+                        uintptr_t ip_off =
+                            code && frame_ip ? (uintptr_t)(frame_ip - code) : 0;
+                        uintptr_t code_sz =
+                            code && code_end ? (uintptr_t)(code_end - code) : 0;
+                        uint8 *frame_ip_in_frame = frame ? frame->ip : NULL;
+                        fprintf(stderr,
+                                "[badop] tid=%d func_idx=%u opcode=0x%02x ip_off=%lu code_sz=%lu ip=%p ip_end=%p code=%p code_end=%p frame_ip_in_frame=%p\n",
+                                thread_id,
+                                (uint32)(cur_func - module->e->functions),
+                                (uint32)opcode, (unsigned long)ip_off,
+                                (unsigned long)code_sz, frame_ip, frame_ip_end,
+                                code, code_end, frame_ip_in_frame);
+                        badop_log_count++;
+                    }
+                }
+                tracebuf_dump(exec_env, module, cur_func, frame, frame_ip,
+                              frame_ip_end, "badop");
                 wasm_set_exception(module, "unsupported opcode");
                 goto got_exception;
         }
@@ -6899,6 +7310,31 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
         HANDLE_OP(EXT_OP_COPY_STACK_TOP_I64)
         HANDLE_OP(EXT_OP_COPY_STACK_VALUES)
         {
+            if (getenv("WAMR_BADOPLOG")) {
+                static __thread int badop_log_count;
+                if (badop_log_count < 4) {
+                    ThreadStartArg *thread_arg =
+                        (ThreadStartArg *)exec_env->thread_arg;
+                    int32 thread_id = thread_arg ? thread_arg->thread_id : -1;
+                    uint8 *code = wasm_get_func_code(cur_func);
+                    uint8 *code_end = wasm_get_func_code_end(cur_func);
+                    uintptr_t ip_off =
+                        code && frame_ip ? (uintptr_t)(frame_ip - code) : 0;
+                    uintptr_t code_sz =
+                        code && code_end ? (uintptr_t)(code_end - code) : 0;
+                    uint32 op = frame_ip ? (uint32) * (frame_ip - 1) : 0;
+                    uint8 *frame_ip_in_frame = frame ? frame->ip : NULL;
+                    fprintf(stderr,
+                            "[badop] tid=%d func_idx=%u opcode=0x%02x ip_off=%lu code_sz=%lu ip=%p ip_end=%p code=%p code_end=%p frame_ip_in_frame=%p\n",
+                            thread_id, (uint32)(cur_func - module->e->functions),
+                            op, (unsigned long)ip_off, (unsigned long)code_sz,
+                            frame_ip, frame_ip_end, code, code_end,
+                            frame_ip_in_frame);
+                    badop_log_count++;
+                }
+            }
+            tracebuf_dump(exec_env, module, cur_func, frame, frame_ip,
+                          frame_ip_end, "badop");
             wasm_set_exception(module, "unsupported opcode");
             goto got_exception;
         }
@@ -7199,6 +7635,17 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
             frame_ip = frame_ip_temp;
         }
 #endif
+        {
+            const char *exc = wasm_get_exception(module);
+            if (exc) {
+                tracebuf_dump(exec_env, module, cur_func, frame, frame_ip,
+                              frame_ip_end, exc);
+            }
+            else {
+                tracebuf_dump(exec_env, module, cur_func, frame, frame_ip,
+                              frame_ip_end, "exception");
+            }
+        }
         SYNC_ALL_TO_FRAME();
         return;
 

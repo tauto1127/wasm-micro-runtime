@@ -85,11 +85,32 @@ _restore_stack(WASMExecEnv *exec_env, WASMInterpFrame *frame, FILE *fp)
         fread(&type_stack[i], sizeof(uint8), 1, fp);
     }
 
-    // 値スタックのサイズ
-    // uint32 *tsp = frame->tsp_bottom;
+    /*
+     * 値スタックのサイズ
+     *
+     * 旧フォーマット: type stack を積算して value_stack_size を決める
+     * 新フォーマット: dump 側が実測 value_stack_size を 'VSTK' マーカー付きで保存する
+     *
+     * stackmap がズレると旧フォーマットは ctrl stack の読み出し位置がずれて
+     * CSP が破壊され、restore 後に br_if/br 等で out-of-range へ飛ぶ原因になる。
+     */
     uint32 value_stack_size = 0;
-    for (uint32 i = 0; i < type_stack_size; ++i) {
-        value_stack_size += type_stack[i];
+    const uint32 value_stack_marker = 0x5653544B; /* 'VSTK' */
+    uint32 marker_or_first_local = 0;
+    long marker_pos = ftell(fp);
+    if (marker_pos >= 0
+        && fread(&marker_or_first_local, sizeof(uint32), 1, fp) == 1
+        && marker_or_first_local == value_stack_marker) {
+        fread(&value_stack_size, sizeof(uint32), 1, fp);
+    }
+    else {
+        /* old format: rewind and compute from type stack */
+        if (marker_pos >= 0) {
+            fseek(fp, marker_pos, SEEK_SET);
+        }
+        for (uint32 i = 0; i < type_stack_size; ++i) {
+            value_stack_size += type_stack[i];
+        }
     }
     frame->sp = frame->sp_bottom + value_stack_size;
 
@@ -106,16 +127,33 @@ _restore_stack(WASMExecEnv *exec_env, WASMInterpFrame *frame, FILE *fp)
 
     // ラベルスタックの中身
     WASMBranchBlock *csp = frame->csp_bottom;
+    uint8 *code = wasm_get_func_code(frame->function);
+    uint8 *code_end = wasm_get_func_code_end(frame->function);
+    bool csplog = getenv("WAMR_CSPLOG") != NULL;
     for (int i = 0; i < ctrl_stack_size; ++i, ++csp) {
         uint64 offset;
 
         // uint8 *begin_addr;
         fread(&offset, sizeof(uint32), 1, fp);
         csp->begin_addr = set_addr_offset(wasm_get_func_code(frame->function), offset);
+        if (csplog && csp->begin_addr && code && code_end
+            && !(csp->begin_addr >= code && csp->begin_addr < code_end)) {
+            fprintf(stderr,
+                    "[csplog restore] func_idx=%u idx=%d begin_addr=%p out_of_range code=%p code_end=%p off=%u\n",
+                    (uint32)(frame->function - module_inst->e->functions), i,
+                    csp->begin_addr, code, code_end, (uint32)offset);
+        }
 
         // uint8 *target_addr;
         fread(&offset, sizeof(uint32), 1, fp);
         csp->target_addr = set_addr_offset(wasm_get_func_code(frame->function), offset);
+        if (csplog && csp->target_addr && code && code_end
+            && !(csp->target_addr >= code && csp->target_addr < code_end)) {
+            fprintf(stderr,
+                    "[csplog restore] func_idx=%u idx=%d target_addr=%p out_of_range code=%p code_end=%p off=%u\n",
+                    (uint32)(frame->function - module_inst->e->functions), i,
+                    csp->target_addr, code, code_end, (uint32)offset);
+        }
 
         // uint32 *frame_sp;
         fread(&offset, sizeof(uint32), 1, fp);
