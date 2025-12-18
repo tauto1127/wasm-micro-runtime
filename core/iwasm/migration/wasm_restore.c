@@ -154,7 +154,6 @@ wasm_restore_stack(WASMExecEnv **_exec_env, char* file_prefix)
     fclose(fp);
 
     uint32 fidx = 0;
-    printf("for文\n");
     char file_name_stack[MAX_FILE_NAME_LENGTH] = "";
     for (uint32 i = frame_stack_size; i > 0; --i) {
         // char* file_name_stack = wasm_runtime_malloc(sizeof(char) * MAX_FILE_NAME_LENGTH);
@@ -189,7 +188,6 @@ wasm_restore_stack(WASMExecEnv **_exec_env, char* file_prefix)
     wasm_exec_env_set_cur_frame(exec_env, frame);
 
     _exec_env = &exec_env;
-    printf("done wasm_restore_stack\n");
 
     return frame;
 }

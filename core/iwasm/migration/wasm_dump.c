@@ -676,7 +676,8 @@ static bool sig_flag = false;
 
 inline
 void wasm_set_checkpoint(bool f) {
-    sig_flag = f;
+    printf("無視\n");
+    // sig_flag = f;
 }
 
 inline
@@ -711,6 +712,7 @@ signal_control_routine(void *arg)
 
             printf("=======スレッドの同時停止開始=========\n");
             printf("トータルスレッド数：%d, 待機中スレッド数：%d\n", counts, waits);
+            fprintf(stderr, "トータルスレッド数：%d, 待機中スレッド数：%d\n", counts, waits);
             // 停止シグナル
             wasm_cluster_send_signal_all(cluster, WAMR_SIG_CHECKPOINT);
             // wasm_cluster_send_signal_all(cluster, WAMR_SIG_CHECKPOINT);
@@ -733,15 +735,18 @@ signal_control_routine(void *arg)
             };
             os_mutex_unlock(&counter->lock);
             printf("======waitしているスレッド一覧をダンプします========\n");
+            fprintf(stderr, "======waitしているスレッド一覧をダンプします========\n");
             wait_thread_ids = wasm_cluster_get_waiting_thread_ids(cluster);
             wait_thread_ids_count = waits;
             printf("done");
             if (wait_thread_ids) {
                 for (int *p = wait_thread_ids; *p != -2; ++p) {
                     printf("waiting thread id: %d\n", *p);
+                    fprintf("waiting thread id: %d\n", *p);
                 }
             }
             printf("======waiting threadを起こします=========\n");
+            fprintf(stderr, "======waiting threadを起こします=========\n");
 
             // =====スレッド同時停止======
             wasm_cluster_wake_up_threads(cluster);
@@ -751,6 +756,7 @@ signal_control_routine(void *arg)
                 if (counter->checkpointing_count == counts) {
                     os_mutex_unlock(&counter->lock);
                     printf("all waiting threads wake up!! checkpointing count: %d\n", counter->checkpointing_count);
+                    fprintf(stderr, "all waiting threads wake up!! checkpointing count: %d\n", counter->checkpointing_count);
                     break;
                 }
                 os_cond_wait(&counter->cond, &counter->lock);
@@ -758,6 +764,7 @@ signal_control_routine(void *arg)
 
             // ========チェックポイント開始========
             printf("======start checkpoint========\n");
+            fprintf(stderr, "======start checkpoint========\n");
             counter = wasm_cluster_init_checkpointing_counter(cluster, 0);
             wasm_cluster_thread_continue_all(cluster);
 
@@ -768,6 +775,7 @@ signal_control_routine(void *arg)
                 counts = wasm_cluster_get_thread_count(cluster);
                 if (counter->checkpointing_count == counts) {
                     printf("========all waiting threads check pointed!! count: %d===========\n", counter->checkpointing_count);
+                    fprintf(stderr, "========all waiting threads check pointed!! count: %d===========\n", counter->checkpointing_count);
                     os_mutex_unlock(&counter->lock);
                     break;
                 }

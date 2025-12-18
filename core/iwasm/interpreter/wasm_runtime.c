@@ -178,6 +178,7 @@ memory_instantiate(WASMModuleInstance *module_inst, WASMModuleInstance *parent,
 
     /* shared memory */
     if (is_shared_memory && parent != NULL) {
+        printf("独立メモリとしてインスタンス化しません\n");
         bh_assert(parent->memory_count > memory_idx);
         memory = parent->memories[memory_idx];
         shared_memory_inc_reference(memory);

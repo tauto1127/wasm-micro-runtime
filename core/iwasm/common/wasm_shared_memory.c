@@ -8,6 +8,7 @@
 #include "wasm_export.h"
 #include "wasm_shared_memory.h"
 #include "bh_hashmap.h"
+#include <stdlib.h>
 #if WASM_ENABLE_THREAD_MGR != 0
 #include "../libraries/thread-mgr/thread_manager.h"
 #include "../libraries/lib-wasi-threads/lib_wasi_threads_wrapper.h"
@@ -49,6 +50,85 @@ typedef struct AtomicWaitNode {
 
 /* Atomic wait map */
 static HashMap *wait_map;
+
+static bool
+waitlog_enabled(void)
+{
+    static bool inited;
+    static bool enabled;
+
+    if (!inited) {
+        enabled = getenv("WAMR_WAITLOG") != NULL;
+        inited = true;
+    }
+    return enabled;
+}
+
+static int64
+waitlog_filter_offset(void)
+{
+    static bool inited;
+    static int64 filter = -1; /* -1: no filter (print all) */
+
+    if (!inited) {
+        const char *val = getenv("WAMR_WAITLOG_OFFSET");
+        if (val && *val) {
+            char *end = NULL;
+            filter = (int64)strtoll(val, &end, 0);
+            if (end == val) {
+                filter = -1;
+            }
+        }
+        inited = true;
+    }
+    return filter;
+}
+
+static uint32
+waitlog_every(void)
+{
+    static bool inited;
+    static uint32 every = 1;
+
+    if (!inited) {
+        const char *val = getenv("WAMR_WAITLOG_EVERY");
+        if (val && *val) {
+            char *end = NULL;
+            long parsed = strtol(val, &end, 10);
+            if (end != val && parsed > 0 && parsed < 1000000) {
+                every = (uint32)parsed;
+            }
+        }
+        inited = true;
+    }
+    return every;
+}
+
+static bool
+waitlog_should_print(WASMModuleInstance *module_inst, void *address,
+                     uint64 *out_addr_offset)
+{
+    uint64 addr_offset;
+    int64 filter;
+
+    if (!waitlog_enabled()) {
+        return false;
+    }
+
+    addr_offset =
+        (uint64)((uintptr_t)address
+                 - (uintptr_t)module_inst->memories[0]->memory_data);
+    if (out_addr_offset) {
+        *out_addr_offset = addr_offset;
+    }
+
+    filter = waitlog_filter_offset();
+    if (filter != -1 && (uint64)filter != addr_offset) {
+        return false;
+    }
+
+    return true;
+}
 
 static uint32
 wait_address_hash(const void *address);
@@ -279,6 +359,10 @@ wasm_runtime_atomic_wait(WASMModuleInstanceCommon *module, void *address,
 #endif
     uint64 timeout_left, timeout_wait, timeout_1sec;
     bool check_ret, is_timeout, no_wait;
+    uint64 addr_offset = 0;
+    uint32 log_every = 1;
+    static uint32 wait_seq;
+    uint32 seq = 0;
 
     bh_assert(module->module_type == Wasm_Module_Bytecode
               || module->module_type == Wasm_Module_AoT);
@@ -303,6 +387,18 @@ wasm_runtime_atomic_wait(WASMModuleInstanceCommon *module, void *address,
     }
     shared_memory_unlock(module_inst->memories[0]);
 
+    log_every = waitlog_every();
+    if (waitlog_should_print(module_inst, address, &addr_offset)) {
+        seq = ++wait_seq;
+        if (log_every == 1 || (seq % log_every) == 0) {
+            fprintf(stderr,
+                    "[wait pre-search] seq=%u addr_off=0x%llx expect=0x%llx timeout=%lld wait64=%d\n",
+                    seq, (unsigned long long)addr_offset,
+                    (unsigned long long)expect, (long long)timeout,
+                    wait64 ? 1 : 0);
+        }
+    }
+
 #if WASM_ENABLE_THREAD_MGR != 0
     exec_env =
         wasm_clusters_search_exec_env((WASMModuleInstanceCommon *)module_inst);
@@ -310,6 +406,17 @@ wasm_runtime_atomic_wait(WASMModuleInstanceCommon *module, void *address,
 #endif
 
     lock = shared_memory_get_lock_pointer(module_inst->memories[0]);
+
+    if (seq && (log_every == 1 || (seq % log_every) == 0)) {
+        int32 tid = -1;
+#if WASM_ENABLE_THREAD_MGR != 0
+        ThreadStartArg *arg =
+            exec_env ? (ThreadStartArg *)exec_env->thread_arg : NULL;
+        tid = arg ? arg->thread_id : -1;
+#endif
+        fprintf(stderr, "[wait enter] seq=%u tid=%d addr_off=0x%llx\n", seq,
+                tid, (unsigned long long)addr_offset);
+    }
 
     /* Lock the shared_mem_lock for the whole atomic wait process,
        and use it to os_cond_reltimedwait */
@@ -319,6 +426,11 @@ wasm_runtime_atomic_wait(WASMModuleInstanceCommon *module, void *address,
               || (wait64 && *(uint64 *)address != expect);
 
     if (no_wait) {
+        if (seq && (log_every == 1 || (seq % log_every) == 0)) {
+            fprintf(stderr,
+                    "[wait skip]  seq=%u addr_off=0x%llx reason=no_wait\n",
+                    seq, (unsigned long long)addr_offset);
+        }
         os_mutex_unlock(lock);
         return 1;
     }
@@ -347,11 +459,22 @@ wasm_runtime_atomic_wait(WASMModuleInstanceCommon *module, void *address,
     wait_info = acquire_wait_info(address, wait_node);
 
     if (!wait_info) {
+        if (seq && (log_every == 1 || (seq % log_every) == 0)) {
+            fprintf(stderr,
+                    "[wait fail]  seq=%u addr_off=0x%llx reason=acquire_wait_info\n",
+                    seq, (unsigned long long)addr_offset);
+        }
         os_mutex_unlock(lock);
         os_cond_destroy(&wait_node->wait_cond);
         wasm_runtime_free(wait_node);
         wasm_runtime_set_exception(module, "failed to acquire wait_info");
         return -1;
+    }
+
+    if (seq && (log_every == 1 || (seq % log_every) == 0)) {
+        fprintf(stderr,
+                "[wait armed] seq=%u addr_off=0x%llx waiters=%u\n",
+                seq, (unsigned long long)addr_offset, wait_info->wait_list->len);
     }
 
     /* unit of timeout is nsec, convert it to usec */
@@ -406,6 +529,13 @@ wasm_runtime_atomic_wait(WASMModuleInstanceCommon *module, void *address,
 
     os_mutex_unlock(lock);
 
+    if (seq && (log_every == 1 || (seq % log_every) == 0)) {
+        fprintf(stderr,
+                "[wait exit]  seq=%u addr_off=0x%llx result=%s\n",
+                seq, (unsigned long long)addr_offset,
+                is_timeout ? "timeout" : "notified");
+    }
+
     return is_timeout ? 2 : 0;
 }
 
@@ -418,6 +548,10 @@ wasm_runtime_atomic_notify(WASMModuleInstanceCommon *module, void *address,
     AtomicWaitInfo *wait_info;
     korp_mutex *lock;
     bool out_of_bounds;
+    uint64 addr_offset = 0;
+    uint32 log_every = 1;
+    static uint32 notify_seq;
+    uint32 seq = 0;
 
     bh_assert(module->module_type == Wasm_Module_Bytecode
               || module->module_type == Wasm_Module_AoT);
@@ -442,6 +576,16 @@ wasm_runtime_atomic_notify(WASMModuleInstanceCommon *module, void *address,
 
     lock = shared_memory_get_lock_pointer(module_inst->memories[0]);
 
+    log_every = waitlog_every();
+    if (waitlog_should_print(module_inst, address, &addr_offset)) {
+        seq = ++notify_seq;
+        if (log_every == 1 || (seq % log_every) == 0) {
+            fprintf(stderr,
+                    "[notify enter] seq=%u addr_off=0x%llx count=%u\n",
+                    seq, (unsigned long long)addr_offset, count);
+        }
+    }
+
     /* Lock the shared_mem_lock for the whole atomic notify process,
        and use it to os_cond_signal */
     os_mutex_lock(lock);
@@ -450,14 +594,30 @@ wasm_runtime_atomic_notify(WASMModuleInstanceCommon *module, void *address,
 
     /* Nobody wait on this address */
     if (!wait_info) {
+        if (seq && (log_every == 1 || (seq % log_every) == 0)) {
+            fprintf(stderr,
+                    "[notify miss]  seq=%u addr_off=0x%llx reason=no_wait_info\n",
+                    seq, (unsigned long long)addr_offset);
+        }
         os_mutex_unlock(lock);
         return 0;
     }
 
     /* Notify each wait node in the wait list */
+    if (seq && (log_every == 1 || (seq % log_every) == 0)) {
+        fprintf(stderr,
+                "[notify hit]   seq=%u addr_off=0x%llx waiters=%u\n",
+                seq, (unsigned long long)addr_offset, wait_info->wait_list->len);
+    }
     notify_result = notify_wait_list(wait_info->wait_list, count);
 
     os_mutex_unlock(lock);
+
+    if (seq && (log_every == 1 || (seq % log_every) == 0)) {
+        fprintf(stderr,
+                "[notify exit]  seq=%u addr_off=0x%llx notified=%u\n",
+                seq, (unsigned long long)addr_offset, notify_result);
+    }
 
     return notify_result;
 }
