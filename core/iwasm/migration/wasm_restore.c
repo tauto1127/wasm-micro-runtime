@@ -88,7 +88,9 @@ _restore_stack(WASMExecEnv *exec_env, WASMInterpFrame *frame, FILE *fp)
     // 値スタックのサイズ
     // uint32 *tsp = frame->tsp_bottom;
     uint32 value_stack_size = 0;
-    fread(&value_stack_size, sizeof(uint32), 1, fp);
+    for (uint32 i = 0; i < type_stack_size; ++i) {
+        value_stack_size += type_stack[i];
+    }
 
     frame->sp = frame->sp_bottom + value_stack_size;
 

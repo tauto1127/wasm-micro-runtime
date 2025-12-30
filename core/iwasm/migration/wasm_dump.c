@@ -257,7 +257,6 @@ _dump_stack(WASMExecEnv *exec_env, struct WASMInterpFrame *frame, FILE *fp, bool
     uint32 local_cell_num = func->param_cell_num + func->local_cell_num;
     uint32 value_stack_size = frame->sp - frame->sp_bottom;
 
-    fwrite(&value_stack_size, sizeof(uint32), 1, fp);
     fwrite(frame->lp, sizeof(uint32), local_cell_num, fp);
     fwrite(frame->sp_bottom, sizeof(uint32), value_stack_size, fp);
 
