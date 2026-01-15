@@ -2035,6 +2035,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
 
                 /* No frame found with exception handler; validation should
                  * catch it */
+                bh_assert(frame_csp >= frame->csp_bottom + relative_depth);
 
 
                 /* go up the frame stack */
