@@ -1490,10 +1490,6 @@ wasm_interp_call_func_import(WASMModuleInstance *module_inst,
 #define CHECK_SUSPEND_FLAGS()                                         \
     do {                                                              \
         WASM_SUSPEND_FLAGS_LOCK(exec_env->wait_lock);                 \
-        /*
-        if (IS_WAMR_CHECKPOINT_SIG(exec_env->current_status->signal_flag)) {\
-            CHECKPOINT_THREADS();\
-        }\ */\
         if (WASM_SUSPEND_FLAGS_GET(exec_env->suspend_flags)           \
             & WASM_SUSPEND_FLAG_TERMINATE) {                          \
             /* terminate current thread */                            \
@@ -6372,24 +6368,9 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                         CHECK_MEMORY_OVERFLOW(4);
                         CHECK_ATOMIC_MEMORY_ACCESS();
 
-
-                        ThreadStartArg* arg = exec_env->thread_arg;
-                        int tid = -1;
-                        if(arg != NULL) {
-                            tid = arg->thread_id;
-                        }
-
-                        HashMap* wait_map =get_wait_map();
-
-                        uint8 *base = memory ? memory->memory_data : NULL;
-                        uintptr_t off = (base && maddr) ? (uintptr_t)((uint8*)maddr - base) : 0;
-                        uint32 cur = maddr ? *(uint32*)maddr : 0;
-
-
                         ret = wasm_runtime_atomic_notify(
                             (WASMModuleInstanceCommon *)module, maddr,
                             notify_count);
-
                         if (ret == (uint32)-1)
                             goto got_exception;
 
@@ -6407,24 +6388,11 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                         CHECK_MEMORY_OVERFLOW(4);
                         CHECK_ATOMIC_MEMORY_ACCESS();
 
-                        ThreadStartArg* arg = exec_env->thread_arg;
-                        int tid = -1;
-                        if(arg != NULL) {
-                            tid = arg->thread_id;
-                        }
-
-                        HashMap* wait_map =get_wait_map();
-
-                        uint8 *base = memory ? memory->memory_data : NULL;
-                        uintptr_t off = (base && maddr) ? (uintptr_t)((uint8*)maddr - base) : 0;
-                        uint32 cur = maddr ? *(uint32*)maddr : 0;
-
                         ret = wasm_runtime_atomic_wait(
                             (WASMModuleInstanceCommon *)module, maddr,
                             (uint64)expect, timeout, false);
                         if (ret == (uint32)-1)
                             goto got_exception;
-                        // printf("atomic_wait done return: %u\n", ret);
 
 #if WASM_ENABLE_THREAD_MGR != 0
                         CHECK_SUSPEND_FLAGS();
