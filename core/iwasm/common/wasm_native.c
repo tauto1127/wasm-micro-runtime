@@ -211,7 +211,6 @@ wasm_native_resolve_symbol(const char *module_name, const char *field_name,
     while (node) {
         node_next = node->next;
         if (!strcmp(node->module_name, module_name)) {
-            printf("Looking up symbol: %s\n", field_name);
             if ((func_ptr =
                      lookup_symbol(node->native_symbols, node->n_native_symbols,
                                    field_name, &signature, &attachment))

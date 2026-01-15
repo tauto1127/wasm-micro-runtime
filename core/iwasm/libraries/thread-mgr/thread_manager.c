@@ -554,7 +554,6 @@ wasm_cluster_spawn_exec_env(WASMExecEnv *exec_env)
     if (!(wasm_cluster_dup_c_api_imports(new_module_inst, module_inst))) {
         goto fail1;
     }
-    printf("auxstackがなんちゃら\n");
 
     if (!wasm_cluster_allocate_aux_stack(exec_env, &aux_stack_start,
                                          &aux_stack_size)) {
@@ -1468,7 +1467,6 @@ suspend_thread_visitor(void *node, void *user_data)
 void
 wasm_cluster_suspend_all(WASMCluster *cluster)
 {
-    printf("wasm_cluster_suspend_all called\n");
     os_mutex_lock(&cluster->lock);
     traverse_list(&cluster->exec_env_list, suspend_thread_visitor, NULL);
     os_mutex_unlock(&cluster->lock);

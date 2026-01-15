@@ -70,7 +70,6 @@ thread_start(void *arg)
 static int32
 thread_spawn_wrapper(wasm_exec_env_t exec_env, uint32 start_arg)
 {
-    printf("thread_spawn_wrapper start_arg=%u\n", start_arg);
     wasm_module_t module = wasm_exec_env_get_module(exec_env);
     wasm_module_inst_t module_inst = get_module_inst(exec_env);
     wasm_module_inst_t new_module_inst = NULL;
