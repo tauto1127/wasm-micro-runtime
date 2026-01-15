@@ -1602,13 +1602,13 @@ int get_env_int(const char *env_var, int default_value) {
 static int dispatch_count = 0;
 int ckpt_point = -1;
 #define CHECK_DUMP()                                                        \
-    dispatch_count++;                                                       \
     if (IS_WAMR_CHECKPOINT_SIG(exec_env->current_status->signal_flag)) {\
         CHECKPOINT_THREADS();\
     }\
     // if (wasm_get_checkpoint() || dispatch_count == ckpt_point) {            \
     //     DO_CHECKPOINT();                                                    \
     // }
+    // dispatch_count++;                                                       \
 
 // #define FETCH_OPCODE_AND_DISPATCH() goto *handle_table[*frame_ip++]
 #define FETCH_OPCODE_AND_DISPATCH()                                     \
