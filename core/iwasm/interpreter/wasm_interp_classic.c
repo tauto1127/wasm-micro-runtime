@@ -2061,9 +2061,6 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
 #else
     FETCH_OPCODE_AND_DISPATCH();
 #endif
-#if WASM_ENABLE_THREAD_MGR != 0
-                CHECK_SUSPEND_FLAGS();
-#endif
             /* control instructions */
             HANDLE_OP(WASM_OP_UNREACHABLE)
             {
