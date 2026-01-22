@@ -1940,6 +1940,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
             clock_gettime(CLOCK_MONOTONIC, &endAt);
             fprintf(stderr, "restore done:%lu\n", get_time(startAt, endAt));
 
+            set_restore_flag(false);
             FETCH_OPCODE_AND_DISPATCH();
         } else {
             printf("メインスレッドじゃない: %lu and SIG_RESTORE\n", pthread_self());
@@ -2005,6 +2006,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
             printf("[waiting_run end] tid=%d host=%lu\n", cur_thread_arg->thread_id, (unsigned long)pthread_self());
             printf("%d: thread run\n", cur_thread_arg->thread_id);
             printf("線形メモリ：%p\n", memory->memory_data);
+            set_restore_flag(false);
             FETCH_OPCODE_AND_DISPATCH();
         }
     }
