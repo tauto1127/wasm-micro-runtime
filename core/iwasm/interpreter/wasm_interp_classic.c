@@ -1780,6 +1780,9 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
     if (get_restore_flag()) {
         ThreadStartArg *thread_arg = (ThreadStartArg *)exec_env->thread_arg;
         if (exec_env->current_status->signal_flag != WAMR_SIG_RESTORE) {
+            struct timespec startAt, endAt;
+            // dump linear memory
+            clock_gettime(CLOCK_MONOTONIC, &startAt);
             wasm_cluster_thread_send_signal(exec_env, WAMR_SIG_RESTORE);
             printf("メインスレッド\n");
             is_main = true;
@@ -1933,7 +1936,10 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
             os_mutex_unlock(&exec_env->wait_lock);
             printf("main thread wake up!\n");
 
-            printf("線形メモリ：%p\n", memory->memory_data);
+            // リストア完了時間の計測(終了)
+            clock_gettime(CLOCK_MONOTONIC, &endAt);
+            fprintf(stderr, "restore done:%lu\n", get_time(startAt, endAt));
+
             FETCH_OPCODE_AND_DISPATCH();
         } else {
             printf("メインスレッドじゃない: %lu and SIG_RESTORE\n", pthread_self());

@@ -705,6 +705,9 @@ signal_control_routine(void *arg)
         }
         // チェックポイントシグナルが届いた時
         if (sig == SIGUSR2) {
+            struct timespec startAt, endAt;
+            // dump linear memory
+            clock_gettime(CLOCK_MONOTONIC, &startAt);
             int waits = wasm_cluster_get_waiting_thread_count(cluster);
             int counts = wasm_cluster_get_thread_count(cluster);
 
@@ -774,6 +777,8 @@ signal_control_routine(void *arg)
                 }
                 os_cond_wait(&counter->cond, &counter->lock);
             };
+            clock_gettime(CLOCK_MONOTONIC, &endAt);
+            fprintf(stderr, "checkpoint done:%lu\n", get_time(startAt, endAt));
 
             exit(0);
             // wasm_cluster_reset_checkpointing_counter(cluster);
