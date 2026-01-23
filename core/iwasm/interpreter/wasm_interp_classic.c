@@ -1670,6 +1670,8 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                                WASMFunctionInstance *cur_func,
                                WASMInterpFrame *prev_frame)
 {
+    // nopでチェックポイント用
+    pthread_t checkpoint_thread;
     maybe_start_signal_control_thread(exec_env->cluster);
     WASMMemoryInstance *memory = wasm_get_default_memory(module);
 #if !defined(OS_ENABLE_HW_BOUND_CHECK)              \
@@ -2028,10 +2030,10 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
 
             HANDLE_OP(WASM_OP_NOP) {
                 // NOPでチェックポイント
-                bool is_nop_checkpoint = getenv("NOP_CKPT");
-                if (is_nop_checkpoint) {
-                    wasm_set_checkpoint(true);
-                }
+                clock_gettime(CLOCK_MONOTONIC, &startAtNop);
+                os_thread_create(&checkpoint_thread, checkpoint_thread_routine, exec_env->cluster,
+                                 APP_THREAD_STACK_SIZE_DEFAULT);
+                // printf("nop\n");
                 HANDLE_OP_END();
             }
 
