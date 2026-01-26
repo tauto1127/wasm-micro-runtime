@@ -573,7 +573,7 @@ main(int argc, char *argv[])
     // TODO: debug buildのときだけ出力するようにする
     struct timespec ts1;
     clock_gettime(CLOCK_MONOTONIC, &ts1);
-    // fprintf(stderr, "boot_start, %lu\n", (uint64_t)(ts1.tv_sec*1e9) + ts1.tv_nsec);
+    fprintf(stderr, "boot_start, %lu\n", (uint64_t)(ts1.tv_sec*1e9) + ts1.tv_nsec);
 
     // signal handler for checkpoint
     // signal(SIGINT, &wasm_interp_sigint);

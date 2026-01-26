@@ -308,6 +308,8 @@ wasm_dump_stack(WASMExecEnv *exec_env, struct WASMInterpFrame *frame, char* file
     char file_name[MAX_FILE_NAME_LENGTH] = "";
     int i = 0;
     do {
+        // struct timespec startUntilDumpStack, endUntilDumpStack;
+        // clock_gettime(CLOCK_REALTIME, &startUntilDumpStack);
         // dummy framenならbreak
         if (frame->function == NULL) break;
 
@@ -319,6 +321,9 @@ wasm_dump_stack(WASMExecEnv *exec_env, struct WASMInterpFrame *frame, char* file
         uint32 entry_fidx = frame->function - module->e->functions;
         fwrite(&entry_fidx, sizeof(uint32), 1, fp);
 
+        // clock_gettime(CLOCK_REALTIME, &endUntilDumpStack);
+        // printf("Time until dump stack file open: %lu ns\n",
+        //        get_time(startUntilDumpStack, endUntilDumpStack));
         _dump_stack(exec_env, frame, fp, (i==1));
         fclose(fp);
     } while((frame = frame->prev_frame));
