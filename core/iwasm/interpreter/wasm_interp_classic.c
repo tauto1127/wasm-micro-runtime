@@ -1940,7 +1940,13 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
             fprintf(stderr, "restore done:%lu\n", get_time(startAt, endAt));
 
             if (is_wait_restore_phase) {
-                goto START_FROM_WAIT;
+                int wait_type = POP_I32();
+                if(wait_type == 32) {
+                    goto START_FROM_WAIT32;
+                } else {
+                    goto START_FROM_WAIT64;
+                }
+
             }
             set_restore_flag(false);
             FETCH_OPCODE_AND_DISPATCH();
@@ -2009,7 +2015,13 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
             printf("%d: thread run\n", cur_thread_arg->thread_id);
             printf("線形メモリ：%p\n", memory->memory_data);
             if (is_wait_restore_phase) {
-                goto START_FROM_WAIT;
+                int wait_type = POP_I32();
+                if(wait_type == 32) {
+                    goto START_FROM_WAIT32;
+                } else {
+                    goto START_FROM_WAIT64;
+                }
+
             }
             set_restore_flag(false);
             FETCH_OPCODE_AND_DISPATCH();
@@ -6396,7 +6408,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                         uint64 timeout;
                         uint32 expect, ret;
 
-                        START_FROM_WAIT:
+                        START_FROM_WAIT32:
                         timeout = POP_I64();
                         expect = POP_I32();
                         addr = POP_MEM_OFFSET();
@@ -6414,6 +6426,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                             PUSH_MEM_OFFSET(addr);
                             PUSH_I32(expect);
                             PUSH_I64(timeout);
+                            PUSH_I32(32);
                             CHECKPOINT_THREADS();
                         }
 
@@ -6429,20 +6442,27 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                         uint64 timeout, expect;
                         uint32 ret;
 
+                        START_FROM_WAIT64:
+
                         timeout = POP_I64();
                         expect = POP_I64();
                         addr = POP_MEM_OFFSET();
                         CHECK_MEMORY_OVERFLOW(8);
                         CHECK_ATOMIC_MEMORY_ACCESS();
 
-                        goto START_FROM_WAIT;
-                        printf("wait64");
-
                         ret = wasm_runtime_atomic_wait(
                             (WASMModuleInstanceCommon *)module, maddr, expect,
                             timeout, true);
                         if (ret == (uint32)-1)
                             goto got_exception;
+                        // チェックポイント時
+                        if (ret == 3) {
+                            PUSH_MEM_OFFSET(addr);
+                            PUSH_I64(expect);
+                            PUSH_I64(timeout);
+                            PUSH_I32(64);
+                            CHECKPOINT_THREADS();
+                        }
 
 #if WASM_ENABLE_THREAD_MGR != 0
                         CHECK_SUSPEND_FLAGS();
