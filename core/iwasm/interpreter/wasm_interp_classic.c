@@ -50,6 +50,8 @@ typedef struct RestoreSyncArgs {
     WASMExecEnv *main_exec_env;
 } RestoreSyncArgs;
 
+extern bool is_wait_restore_phase = false;
+
 static void *
 restore_sync_routine(void *arg)
 {
@@ -62,6 +64,9 @@ restore_sync_routine(void *arg)
     while (main_exec_env->current_status->running_status != STATUS_STOP) {
         usleep(100);
     }
+
+    // 待機中スレッドのリストア，再開
+    is_wait_restore_phase = true;
 
     WASMExecEnv *current_exec_env = bh_list_first_elem(&cluster->exec_env_list);
     while (current_exec_env) {
@@ -91,6 +96,7 @@ restore_sync_routine(void *arg)
         current_exec_env = bh_list_elem_next(current_exec_env);
     }
 
+    is_wait_restore_phase = false;
     printf("done waiting threads run!\n");
 
     wasm_cluster_thread_continue_all(cluster);
@@ -1941,6 +1947,9 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
             fprintf(stderr, "restore done:%lu\n", get_time(startAt, endAt));
 
             set_restore_flag(false);
+            if (is_wait_restore_phase) {
+                goto START_FROM_WAIT;
+            }
             FETCH_OPCODE_AND_DISPATCH();
         } else {
             printf("メインスレッドじゃない: %lu and SIG_RESTORE\n", pthread_self());
@@ -2007,6 +2016,9 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
             printf("%d: thread run\n", cur_thread_arg->thread_id);
             printf("線形メモリ：%p\n", memory->memory_data);
             set_restore_flag(false);
+            if (is_wait_restore_phase) {
+                goto START_FROM_WAIT;
+            }
             FETCH_OPCODE_AND_DISPATCH();
         }
     }
@@ -6396,6 +6408,8 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                         addr = POP_MEM_OFFSET();
                         CHECK_MEMORY_OVERFLOW(4);
                         CHECK_ATOMIC_MEMORY_ACCESS();
+
+                        START_FROM_WAIT:
 
                         ret = wasm_runtime_atomic_wait(
                             (WASMModuleInstanceCommon *)module, maddr,
