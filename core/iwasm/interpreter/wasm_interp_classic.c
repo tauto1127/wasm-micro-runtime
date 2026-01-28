@@ -6403,6 +6403,10 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                         if (ret == (uint32)-1)
                             goto got_exception;
 
+                        if (ret == 3) {
+                            CHECKPOINT_THREADS();
+                        }
+
 #if WASM_ENABLE_THREAD_MGR != 0
                         CHECK_SUSPEND_FLAGS();
 #endif
