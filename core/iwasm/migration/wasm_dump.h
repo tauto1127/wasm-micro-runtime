@@ -6,6 +6,10 @@
 
 void wasm_set_checkpoint(bool f);
 bool wasm_get_checkpoint();
+// void checkpoint_routine(WASMCluster *cluster);
+// nopからのチェックポイント用
+void* checkpoint_thread_routine(void* arg);
+extern struct timespec startAtNop, endAtNop;
 
 int wasm_dump(WASMExecEnv *exec_env,
          struct WASMModuleInstance *module,
