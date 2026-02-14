@@ -50,6 +50,69 @@ typedef struct RestoreSyncArgs {
     WASMExecEnv *main_exec_env;
 } RestoreSyncArgs;
 
+extern bool is_wait_restore_phase = false;
+
+static WASMExecEnv *
+find_exec_env_by_thread_id(WASMCluster *cluster, int thread_id)
+{
+    WASMExecEnv *env = NULL;
+
+    os_mutex_lock(&cluster->lock);
+    env = bh_list_first_elem(&cluster->exec_env_list);
+    while (env) {
+        ThreadStartArg *arg = (ThreadStartArg *)env->thread_arg;
+        if ((thread_id == -1 && arg == NULL)
+            || (arg && arg->thread_id == thread_id)) {
+            os_mutex_unlock(&cluster->lock);
+            return env;
+        }
+        env = bh_list_elem_next(env);
+    }
+    os_mutex_unlock(&cluster->lock);
+
+    return NULL;
+}
+
+static void
+wait_for_waiter_count(WASMCluster *cluster, int expected_count)
+{
+    const uint32 sleep_us = 10;
+
+    while (wasm_cluster_get_waiting_thread_count(cluster) < expected_count) {
+        usleep(sleep_us);
+    }
+}
+
+static bool
+all_threads_stopped(WASMCluster *cluster)
+{
+    bool all_stopped = true;
+
+    os_mutex_lock(&cluster->lock);
+    WASMExecEnv *env = bh_list_first_elem(&cluster->exec_env_list);
+    while (env) {
+        ThreadStartArg *arg = (ThreadStartArg *)env->thread_arg;
+        if (arg && env->current_status->running_status != STATUS_STOP) {
+            all_stopped = false;
+            break;
+        }
+        env = bh_list_elem_next(env);
+    }
+    os_mutex_unlock(&cluster->lock);
+
+    return all_stopped;
+}
+
+static void
+wait_for_all_threads_stop(WASMCluster *cluster)
+{
+    const uint32 sleep_us = 10;
+
+    while (!all_threads_stopped(cluster)) {
+        usleep(sleep_us);
+    }
+}
+
 static void *
 restore_sync_routine(void *arg)
 {
@@ -60,42 +123,51 @@ restore_sync_routine(void *arg)
     int *waiting_thread_ids = args->waiting_thread_ids;
 
     while (main_exec_env->current_status->running_status != STATUS_STOP) {
-        usleep(100);
+        usleep(10);
     }
 
-    WASMExecEnv *current_exec_env = bh_list_first_elem(&cluster->exec_env_list);
-    while (current_exec_env) {
-        ThreadStartArg *thread_arg = (ThreadStartArg *)current_exec_env->thread_arg;
-        if (thread_arg) { // sub thread
-            printf("waking up thread %d: %lu\n", thread_arg->thread_id, pthread_self());
-        }
-        else{
-            printf("waking up thread main!!\n");
-        }
-        int* p = waiting_thread_ids;
-        // チェックポイントした待機中スレッドのスレッドidをループ
-        while (*p) {
-            if (thread_arg == NULL) {
-                if(*p == -1) {
-                    wasm_cluster_thread_continue(current_exec_env);
-                    break;
-                }
-            } else  {
-                if(thread_arg->thread_id == *p) {
-                    wasm_cluster_thread_continue(current_exec_env);
-                    break;
-                }
-            }
-            p++;
-        }
-        current_exec_env = bh_list_elem_next(current_exec_env);
+    // 待機中スレッドのリストア，再開
+    is_wait_restore_phase = true;
+
+    // 待機スレッドだけを再開する
+    /* Wait list uses LIFO insertion (bh_list_insert to head).
+       To reconstruct the same list order, wake threads in reverse. */
+    if (waiting_thread_count > 0 && !waiting_thread_ids) {
+        printf("waiting_thread_ids is NULL with count=%d\n",
+               waiting_thread_count);
+        is_wait_restore_phase = false;
+        wasm_cluster_thread_continue_all(cluster);
+        wasm_runtime_free(args);
+        return NULL;
     }
 
+    for (int i = waiting_thread_count - 1; i >= 0; i--) {
+        int tid = waiting_thread_ids[i];
+        WASMExecEnv *target_env = find_exec_env_by_thread_id(cluster, tid);
+        int expected_waiters = wasm_cluster_get_waiting_thread_count(cluster) + 1;
+
+        if (!target_env) {
+            printf("waiting thread id %d not found\n", tid);
+            continue;
+        }
+
+        printf("waking up thread %d: %lu\n", tid, pthread_self());
+        wasm_cluster_thread_continue(target_env);
+
+        if (i > 0) {
+            wait_for_waiter_count(cluster, expected_waiters);
+        }
+    }
+
+    wait_for_all_threads_stop(cluster);
+    is_wait_restore_phase = false;
     printf("done waiting threads run!\n");
 
     wasm_cluster_thread_continue_all(cluster);
 
-    wasm_runtime_free(args->waiting_thread_ids);
+    if (args->waiting_thread_ids) {
+        wasm_runtime_free(args->waiting_thread_ids);
+    }
     wasm_runtime_free(args);
 
     return NULL;
@@ -1670,6 +1742,8 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                                WASMFunctionInstance *cur_func,
                                WASMInterpFrame *prev_frame)
 {
+    // nopでチェックポイント用
+    pthread_t checkpoint_thread;
     maybe_start_signal_control_thread(exec_env->cluster);
     WASMMemoryInstance *memory = wasm_get_default_memory(module);
 #if !defined(OS_ENABLE_HW_BOUND_CHECK)              \
@@ -1775,7 +1849,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
     // リストアの初期化時間の計測(終了)
     struct timespec ts1;
     clock_gettime(CLOCK_MONOTONIC, &ts1);
-    // fprintf(stderr, "boot_end, %lu\n", (uint64_t)(ts1.tv_sec*1e9) + ts1.tv_nsec);
+    fprintf(stderr, "boot_end, %lu\n", (uint64_t)(ts1.tv_sec*1e9) + ts1.tv_nsec);
 
     if (get_restore_flag()) {
         ThreadStartArg *thread_arg = (ThreadStartArg *)exec_env->thread_arg;
@@ -1821,7 +1895,6 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
             int* waiting_thread_ids = wasm_runtime_malloc(sizeof(int) * waiting_thread_count);
             fread(waiting_thread_ids, sizeof(int), waiting_thread_count, thread_state_fp);
             fclose(thread_state_fp);
-            printf("waiting_thread_ids:\n");
             for(int i = 0; i < waiting_thread_count; i++) {
                 printf("waiting_thread_ids[%d]: %d\n", i, waiting_thread_ids[i]);
             }
@@ -1830,8 +1903,8 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
             restore_thread_id(thread_ids, thread_count - 1);
             struct AtomicCounter* counter = wasm_cluster_init_checkpointing_counter(exec_env->cluster, 0);
 
+            // ここでそれぞれのスレッドは状態のリストアを始める
             for(int *p = thread_ids; *p != -1; p++) {
-                printf("thread_ids : %d\n", *p);
                 int thread_id = *p;
                 char *file_prefix = get_file_prefix(thread_id);
                 printf("Restoring wasm thread %d from %s*\n", thread_id, file_prefix);
@@ -1839,7 +1912,6 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                 printf("Done Restoring wasm thread %d from %s*\n", thread_id, file_prefix);
             }
 
-            printf("done wasm_restore_thread\n");
             // ===========メインスレッドをリストア===========
             // wasm_restore_thread(exec_env, char *file_prefix)
             //
@@ -1849,10 +1921,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
             struct timespec ts2;
 
             clock_gettime(CLOCK_MONOTONIC, &ts1);
-            printf("get_file_prefix\n");
             char *file_prefix = get_file_prefix(-1);
-            printf("wasm_restore_stack\n");
-            // ここで core dumped
             frame = wasm_restore_stack(&exec_env, file_prefix);
             printf("done wasm_restore_stack\n");
             clock_gettime(CLOCK_MONOTONIC, &ts2);
@@ -1893,13 +1962,10 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
             frame_ip_end = wasm_get_func_code_end(cur_func);
 
             frame_lp = frame->lp;
-            printf("1\n");
             wasm_set_checkpoint(false);
-            printf("2\n");
             UPDATE_ALL_FROM_FRAME();
-            printf("3\n");
             // これでインタープリター再開
-            printf("done main checkpoint\n");
+            printf("0\n");
             wasm_cluster_increase_checkpointing_counter(exec_env->cluster);
 
             // ここで全てのスレッドのリストアを待つ．
@@ -1940,7 +2006,16 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
             clock_gettime(CLOCK_MONOTONIC, &endAt);
             fprintf(stderr, "restore done:%lu\n", get_time(startAt, endAt));
 
-            set_restore_flag(false);
+            if (is_wait_restore_phase) {
+                int wait_type = POP_I32();
+                if(wait_type == 32) {
+                    goto START_FROM_WAIT32;
+                } else {
+                    goto START_FROM_WAIT64;
+                }
+
+            }
+            // set_restore_flag(false);
             FETCH_OPCODE_AND_DISPATCH();
         } else {
             printf("メインスレッドじゃない: %lu and SIG_RESTORE\n", pthread_self());
@@ -2006,7 +2081,16 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
             printf("[waiting_run end] tid=%d host=%lu\n", cur_thread_arg->thread_id, (unsigned long)pthread_self());
             printf("%d: thread run\n", cur_thread_arg->thread_id);
             printf("線形メモリ：%p\n", memory->memory_data);
-            set_restore_flag(false);
+            if (is_wait_restore_phase) {
+                int wait_type = POP_I32();
+                if(wait_type == 32) {
+                    goto START_FROM_WAIT32;
+                } else {
+                    goto START_FROM_WAIT64;
+                }
+
+            }
+            // set_restore_flag(false);
             FETCH_OPCODE_AND_DISPATCH();
         }
     }
@@ -2028,10 +2112,10 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
 
             HANDLE_OP(WASM_OP_NOP) {
                 // NOPでチェックポイント
-                bool is_nop_checkpoint = getenv("NOP_CKPT");
-                if (is_nop_checkpoint) {
-                    wasm_set_checkpoint(true);
-                }
+                clock_gettime(CLOCK_MONOTONIC, &startAtNop);
+                os_thread_create(&checkpoint_thread, checkpoint_thread_routine, exec_env->cluster,
+                                 APP_THREAD_STACK_SIZE_DEFAULT);
+                // printf("nop\n");
                 HANDLE_OP_END();
             }
 
@@ -6391,6 +6475,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                         uint64 timeout;
                         uint32 expect, ret;
 
+                        START_FROM_WAIT32:
                         timeout = POP_I64();
                         expect = POP_I32();
                         addr = POP_MEM_OFFSET();
@@ -6402,6 +6487,15 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                             (uint64)expect, timeout, false);
                         if (ret == (uint32)-1)
                             goto got_exception;
+
+                        // チェックポイント時
+                        if (ret == 3) {
+                            PUSH_MEM_OFFSET(addr);
+                            PUSH_I32(expect);
+                            PUSH_I64(timeout);
+                            PUSH_I32(32);
+                            CHECKPOINT_THREADS();
+                        }
 
 #if WASM_ENABLE_THREAD_MGR != 0
                         CHECK_SUSPEND_FLAGS();
@@ -6415,6 +6509,8 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                         uint64 timeout, expect;
                         uint32 ret;
 
+                        START_FROM_WAIT64:
+
                         timeout = POP_I64();
                         expect = POP_I64();
                         addr = POP_MEM_OFFSET();
@@ -6426,6 +6522,14 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                             timeout, true);
                         if (ret == (uint32)-1)
                             goto got_exception;
+                        // チェックポイント時
+                        if (ret == 3) {
+                            PUSH_MEM_OFFSET(addr);
+                            PUSH_I64(expect);
+                            PUSH_I64(timeout);
+                            PUSH_I32(64);
+                            CHECKPOINT_THREADS();
+                        }
 
 #if WASM_ENABLE_THREAD_MGR != 0
                         CHECK_SUSPEND_FLAGS();

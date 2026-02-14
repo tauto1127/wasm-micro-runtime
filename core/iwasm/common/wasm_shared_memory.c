@@ -358,12 +358,19 @@ wasm_runtime_atomic_wait(WASMModuleInstanceCommon *module, void *address,
     timeout_left = (uint64)timeout / 1000;
     timeout_1sec = (uint64)1e6;
 
+    bool is_checkpoint = false;
+
     while (1) {
         if (timeout < 0) {
             /* wait forever until it is notified or terminated
                here we keep waiting and checking every second */
                os_cond_reltimedwait(&wait_node->wait_cond, lock,
                                  (uint64)timeout_1sec);
+            // チェックポイント通知が来てる場合
+            if (IS_WAMR_CHECKPOINT_SIG(exec_env->current_status->signal_flag)) {
+                is_checkpoint = true;
+                break;
+            }
             if (wait_node->status == S_NOTIFIED /* notified by atomic.notify */
 #if WASM_ENABLE_THREAD_MGR != 0
                 /* terminated by other thread */
@@ -377,6 +384,11 @@ wasm_runtime_atomic_wait(WASMModuleInstanceCommon *module, void *address,
             timeout_wait =
                 timeout_left < timeout_1sec ? timeout_left : timeout_1sec;
             os_cond_reltimedwait(&wait_node->wait_cond, lock, timeout_wait);
+            // チェックポイント通知が来てる場合
+            if (IS_WAMR_CHECKPOINT_SIG(exec_env->current_status->signal_flag)) {
+                is_checkpoint = true;
+                break;
+            }
             if (wait_node->status == S_NOTIFIED /* notified by atomic.notify */
                 || timeout_left <= timeout_wait /* time out */
 #if WASM_ENABLE_THREAD_MGR != 0
@@ -405,6 +417,11 @@ wasm_runtime_atomic_wait(WASMModuleInstanceCommon *module, void *address,
     map_try_release_wait_info(wait_map, wait_info, address);
 
     os_mutex_unlock(lock);
+
+    if(is_checkpoint) {
+        // チェックポイントで通知したことを表す
+        return 3;
+    }
 
     return is_timeout ? 2 : 0;
 }
