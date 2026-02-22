@@ -1,3 +1,0 @@
-[submodule "wasm-sample"]
-	path = wasm-sample
-	url = https://github.com/tauto1127/wasm-sample
