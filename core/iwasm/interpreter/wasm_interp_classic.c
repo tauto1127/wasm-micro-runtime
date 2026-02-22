@@ -1844,8 +1844,6 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
     clear_refs();
 #endif
 
-    bool is_main = false;
-
     // リストアの初期化時間の計測(終了)
     struct timespec ts1;
     clock_gettime(CLOCK_MONOTONIC, &ts1);
@@ -1859,7 +1857,6 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
             clock_gettime(CLOCK_MONOTONIC, &startAt);
             wasm_cluster_thread_send_signal(exec_env, WAMR_SIG_RESTORE);
             printf("メインスレッド\n");
-            is_main = true;
             // メイン
             FILE* fp = open_image("main-thread_state.img", "rb");
 
@@ -2015,7 +2012,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                 }
 
             }
-            // set_restore_flag(false);
+            set_restore_flag(false);
             FETCH_OPCODE_AND_DISPATCH();
         } else {
             printf("メインスレッドじゃない: %lu and SIG_RESTORE\n", pthread_self());
@@ -2090,7 +2087,6 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                 }
 
             }
-            // set_restore_flag(false);
             FETCH_OPCODE_AND_DISPATCH();
         }
     }

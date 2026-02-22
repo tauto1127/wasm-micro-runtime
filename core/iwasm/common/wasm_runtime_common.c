@@ -1506,6 +1506,10 @@ wasm_runtime_instantiate_internal(WASMModuleCommon *module,
                                   bool skip_post_instantiate, char *error_buf,
                                   uint32 error_buf_size)
 {
+    if (get_restore_flag()) {
+        skip_post_instantiate = true;
+    }
+
 #if WASM_ENABLE_INTERP != 0
     if (module->module_type == Wasm_Module_Bytecode)
         return (WASMModuleInstanceCommon *)wasm_instantiate(
