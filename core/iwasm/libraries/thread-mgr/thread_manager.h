@@ -7,6 +7,7 @@
 #define _THREAD_MANAGER_H
 
 #include "bh_common.h"
+#include "bh_atomic.h"
 #include "bh_log.h"
 #include "platform_internal.h"
 #include "wasm_export.h"
@@ -208,10 +209,16 @@ wasm_cluster_is_thread_terminated(WASMExecEnv *exec_env);
 #endif
 #if WASM_ENABLE_DEBUG_INTERP != 0 || WASM_ENABLE_CR != 0
 struct WASMCurrentEnvStatus {
-    uint64 signal_flag : 32;
+    bh_atomic_32_t signal_flag;
     uint64 step_count : 16;
     uint64 running_status : 16;
 };
+
+static inline uint32
+wasm_cluster_get_thread_signal(const WASMExecEnv *exec_env)
+{
+    return BH_ATOMIC_32_LOAD(exec_env->current_status->signal_flag);
+}
 
 WASMCurrentEnvStatus *
 wasm_cluster_create_exenv_status();

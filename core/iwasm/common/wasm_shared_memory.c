@@ -367,7 +367,8 @@ wasm_runtime_atomic_wait(WASMModuleInstanceCommon *module, void *address,
                os_cond_reltimedwait(&wait_node->wait_cond, lock,
                                  (uint64)timeout_1sec);
             // チェックポイント通知が来てる場合
-            if (IS_WAMR_CHECKPOINT_SIG(exec_env->current_status->signal_flag)) {
+            if (IS_WAMR_CHECKPOINT_SIG(
+                    wasm_cluster_get_thread_signal(exec_env))) {
                 is_checkpoint = true;
                 break;
             }
@@ -385,7 +386,8 @@ wasm_runtime_atomic_wait(WASMModuleInstanceCommon *module, void *address,
                 timeout_left < timeout_1sec ? timeout_left : timeout_1sec;
             os_cond_reltimedwait(&wait_node->wait_cond, lock, timeout_wait);
             // チェックポイント通知が来てる場合
-            if (IS_WAMR_CHECKPOINT_SIG(exec_env->current_status->signal_flag)) {
+            if (IS_WAMR_CHECKPOINT_SIG(
+                    wasm_cluster_get_thread_signal(exec_env))) {
                 is_checkpoint = true;
                 break;
             }

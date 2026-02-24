@@ -778,8 +778,9 @@ wasm_cluster_create_thread(WASMExecEnv *exec_env,
         (exec_env->suspend_flags.flags & WASM_SUSPEND_FLAG_INHERIT_MASK);
 
     /* もし親execenvがWAMR_RESTOREシグナルを持つなら，それを継承する */
-    if (exec_env->current_status->signal_flag == WAMR_SIG_RESTORE) {
-        new_exec_env->current_status->signal_flag = WAMR_SIG_RESTORE;
+    if (wasm_cluster_get_thread_signal(exec_env) == WAMR_SIG_RESTORE) {
+        BH_ATOMIC_32_STORE(new_exec_env->current_status->signal_flag,
+                           WAMR_SIG_RESTORE);
     }
 
     if (!wasm_cluster_add_exec_env(cluster, new_exec_env))
@@ -891,7 +892,7 @@ wasm_cluster_create_exenv_status()
     }
 
     status->step_count = 0;
-    status->signal_flag = 0;
+    BH_ATOMIC_32_STORE(status->signal_flag, 0);
     status->running_status = 0;
     return status;
 }
@@ -905,13 +906,13 @@ wasm_cluster_destroy_exenv_status(WASMCurrentEnvStatus *status)
 void
 wasm_cluster_clear_thread_signal(WASMExecEnv *exec_env)
 {
-    exec_env->current_status->signal_flag = 0;
+    BH_ATOMIC_32_STORE(exec_env->current_status->signal_flag, 0);
 }
 
 void
 wasm_cluster_thread_send_signal(WASMExecEnv *exec_env, uint32 signo)
 {
-    exec_env->current_status->signal_flag = signo;
+    BH_ATOMIC_32_STORE(exec_env->current_status->signal_flag, signo);
 }
 
 #if WASM_ENABLE_DEBUG_INTERP != 0
