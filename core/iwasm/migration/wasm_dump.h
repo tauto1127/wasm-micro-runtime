@@ -6,6 +6,19 @@
 
 void wasm_set_checkpoint(bool f);
 bool wasm_get_checkpoint();
+bool wasm_ckpt_profile_is_enabled(void);
+void wasm_ckpt_profile_reset_events(void);
+void wasm_ckpt_profile_flush_events(void);
+void wasm_ckpt_profile_flush_restore_events(void);
+void wasm_ckpt_record_phase(WASMExecEnv *exec_env, const char *phase,
+                            const struct timespec *start_ts,
+                            const struct timespec *end_ts);
+void wasm_ckpt_record_phase_with_tid(int thread_id, const char *phase,
+                                     const struct timespec *start_ts,
+                                     const struct timespec *end_ts);
+void wasm_ckpt_record_dispatch_wait(WASMExecEnv *exec_env,
+                                    const struct timespec *start_ts,
+                                    const struct timespec *end_ts);
 // void checkpoint_routine(WASMCluster *cluster);
 // nopからのチェックポイント用
 void* checkpoint_thread_routine(void* arg);

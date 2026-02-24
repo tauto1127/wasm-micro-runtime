@@ -1,0 +1,14 @@
+thread_id,phase,start_ns,end_ns,duration_ns
+-2,ckpt_trigger,4.28196E+14,4.28196E+14,8255
+-1,dump_memory,4.28196E+14,4.28196E+14,362998
+-1,dump_global,4.28196E+14,4.28196E+14,72818
+-1,dump_pc,4.28196E+14,4.28196E+14,24466
+-1,dump_stack_type_stack,4.28196E+14,4.28196E+14,26430
+-1,dump_stack_frame_data,4.28196E+14,4.28196E+14,26780
+-1,dump_stack_type_stack,4.28196E+14,4.28196E+14,16641
+-1,dump_stack_frame_data,4.28196E+14,4.28196E+14,17012
+-1,dump_stack_frames,4.28196E+14,4.28196E+14,153491
+-1,dump_stack_frame_count,4.28196E+14,4.28196E+14,48723
+-1,dump_stack,4.28196E+14,4.28196E+14,202694
+-1,dump_total,4.28196E+14,4.28196E+14,674366
+-2,ckpt_total,4.28196E+14,4.28196E+14,682702

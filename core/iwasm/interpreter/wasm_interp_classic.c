@@ -48,6 +48,8 @@ typedef struct RestoreSyncArgs {
     int waiting_thread_count;
     int *waiting_thread_ids;
     WASMExecEnv *main_exec_env;
+    bool profile_enabled;
+    struct timespec create_start_ts;
 } RestoreSyncArgs;
 
 extern bool is_wait_restore_phase = false;
@@ -117,11 +119,18 @@ static void *
 restore_sync_routine(void *arg)
 {
     RestoreSyncArgs *args = (RestoreSyncArgs *)arg;
+    if (args->profile_enabled) {
+        struct timespec entry_ts;
+        clock_gettime(CLOCK_MONOTONIC, &entry_ts);
+        wasm_ckpt_record_phase_with_tid(-2, "restore_sync_thread_create",
+                                        &args->create_start_ts, &entry_ts);
+    }
     WASMExecEnv *main_exec_env = args->main_exec_env;
     WASMCluster *cluster = main_exec_env->cluster;
     int waiting_thread_count = args->waiting_thread_count;
     int *waiting_thread_ids = args->waiting_thread_ids;
 
+    // メインスレッドが停止するのを待つ
     while (main_exec_env->current_status->running_status != STATUS_STOP) {
         usleep(10);
     }
@@ -1625,11 +1634,24 @@ static int dispatch_count = 0;
 int ckpt_point = -1;
 #define CHECK_DUMP()                                                        \
     if (dispatch_count == 24943699) { \
+        struct timespec ckpt_wait_start_ts; \
+        clock_gettime(CLOCK_MONOTONIC, &ckpt_wait_start_ts); \
         while(true) {\
             if (IS_WAMR_CHECKPOINT_SIG(wasm_cluster_get_thread_signal(exec_env))) {\
+                struct timespec ckpt_wait_end_ts; \
+                uint64 ckpt_wait_start_ns, ckpt_wait_end_ns; \
+                clock_gettime(CLOCK_MONOTONIC, &ckpt_wait_end_ts); \
+                ckpt_wait_start_ns = (uint64)ckpt_wait_start_ts.tv_sec * 1000000000ULL \
+                                     + (uint64)ckpt_wait_start_ts.tv_nsec; \
+                ckpt_wait_end_ns = (uint64)ckpt_wait_end_ts.tv_sec * 1000000000ULL \
+                                   + (uint64)ckpt_wait_end_ts.tv_nsec; \
+                fprintf(stderr, "ckpt_wait_after_dispatch_ns, %llu\n", \
+                        (unsigned long long)(ckpt_wait_end_ns - ckpt_wait_start_ns)); \
+                wasm_ckpt_record_dispatch_wait(exec_env, &ckpt_wait_start_ts, \
+                                               &ckpt_wait_end_ts); \
                 printf("チェックポイントdispatch: %d\n", dispatch_count++);\
-        CHECKPOINT_THREADS();\
-    }\
+                CHECKPOINT_THREADS();\
+            }\
         }\
     }\
     if (IS_WAMR_CHECKPOINT_SIG(wasm_cluster_get_thread_signal(exec_env))) {\
@@ -1860,12 +1882,23 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
     fprintf(stderr, "boot_end, %lu\n", (uint64_t)(ts1.tv_sec*1e9) + ts1.tv_nsec);
 
     if (get_restore_flag()) {
+        bool restore_profile_enabled = wasm_ckpt_profile_is_enabled();
         ThreadStartArg *thread_arg = (ThreadStartArg *)exec_env->thread_arg;
         if (wasm_cluster_get_thread_signal(exec_env) != WAMR_SIG_RESTORE) {
             struct timespec startAt, endAt;
-            // dump linear memory
+            struct timespec phase_start, phase_end;
             clock_gettime(CLOCK_MONOTONIC, &startAt);
+            if (restore_profile_enabled) {
+                wasm_ckpt_profile_reset_events();
+                clock_gettime(CLOCK_MONOTONIC, &phase_start);
+            }
             wasm_cluster_thread_send_signal(exec_env, WAMR_SIG_RESTORE);
+            if (restore_profile_enabled) {
+                clock_gettime(CLOCK_MONOTONIC, &phase_end);
+                wasm_ckpt_record_phase_with_tid(-2, "restore_signal",
+                                                &phase_start, &phase_end);
+                clock_gettime(CLOCK_MONOTONIC, &phase_start);
+            }
             printf("メインスレッド\n");
             // メイン
             FILE* fp = open_image("main-thread_state.img", "rb");
@@ -1905,18 +1938,31 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
             for(int i = 0; i < waiting_thread_count; i++) {
                 printf("waiting_thread_ids[%d]: %d\n", i, waiting_thread_ids[i]);
             }
+            if (restore_profile_enabled) {
+                clock_gettime(CLOCK_MONOTONIC, &phase_end);
+                wasm_ckpt_record_phase_with_tid(-2, "restore_thread_state_load",
+                                                &phase_start, &phase_end);
+            }
 
             // tid_allocatorの復元
             restore_thread_id(thread_ids, thread_count - 1);
             struct AtomicCounter* counter = wasm_cluster_init_checkpointing_counter(exec_env->cluster, 0);
 
             // ここでそれぞれのスレッドは状態のリストアを始める
+            if (restore_profile_enabled) {
+                clock_gettime(CLOCK_MONOTONIC, &phase_start);
+            }
             for(int *p = thread_ids; *p != -1; p++) {
                 int thread_id = *p;
                 char *file_prefix = get_file_prefix(thread_id);
                 printf("Restoring wasm thread %d from %s*\n", thread_id, file_prefix);
                 wasm_restore_thread(exec_env, file_prefix);
                 printf("Done Restoring wasm thread %d from %s*\n", thread_id, file_prefix);
+            }
+            if (restore_profile_enabled) {
+                clock_gettime(CLOCK_MONOTONIC, &phase_end);
+                wasm_ckpt_record_phase_with_tid(-2, "restore_spawn_workers",
+                                                &phase_start, &phase_end);
             }
 
             // ===========メインスレッドをリストア===========
@@ -1932,7 +1978,9 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
             frame = wasm_restore_stack(&exec_env, file_prefix);
             printf("done wasm_restore_stack\n");
             clock_gettime(CLOCK_MONOTONIC, &ts2);
-            fprintf(stderr, "stack, %lu\n", get_time(ts1, ts2));
+            if (!restore_profile_enabled) {
+                fprintf(stderr, "stack, %lu\n", get_time(ts1, ts2));
+            }
             if (frame == NULL) {
                 perror("Error:wasm_interp_func_bytecode:frame is NULL\n");
                 return;
@@ -1976,6 +2024,9 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
             wasm_cluster_increase_checkpointing_counter(exec_env->cluster);
 
             // ここで全てのスレッドのリストアを待つ．
+            if (restore_profile_enabled) {
+                clock_gettime(CLOCK_MONOTONIC, &phase_start);
+            }
             os_mutex_lock(&counter->lock);
             for(;;) {
                 if (thread_count == counter->checkpointing_count) {
@@ -1986,6 +2037,11 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                 os_cond_wait(&counter->cond, &counter->lock);
             }
             os_mutex_unlock(&counter->lock);
+            if (restore_profile_enabled) {
+                clock_gettime(CLOCK_MONOTONIC, &phase_end);
+                wasm_ckpt_record_phase_with_tid(-2, "restore_wait_all_threads",
+                                                &phase_start, &phase_end);
+            }
             printf("========all threads restore done\n");
             // Create a helper thread to manage thread synchronization and wakeup
             RestoreSyncArgs *args = wasm_runtime_malloc(sizeof(RestoreSyncArgs));
@@ -1996,22 +2052,41 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
             args->main_exec_env = exec_env;
             args->waiting_thread_count = waiting_thread_count;
             args->waiting_thread_ids = waiting_thread_ids;
+            args->profile_enabled = restore_profile_enabled;
 
             korp_thread sync_thread_id;
+            if (restore_profile_enabled) {
+                clock_gettime(CLOCK_MONOTONIC, &args->create_start_ts);
+            }
             if (os_thread_create(&sync_thread_id, restore_sync_routine, args,
                 APP_THREAD_STACK_SIZE_DEFAULT) != 0) {
                 perror("Failed to create restore sync thread");
                 wasm_runtime_free(args);
                 return;
             }
+            if (restore_profile_enabled) {
+                clock_gettime(CLOCK_MONOTONIC, &phase_start);
+            }
             os_mutex_lock(&exec_env->wait_lock);
             wasm_cluster_thread_waiting_run(exec_env);
             os_mutex_unlock(&exec_env->wait_lock);
+            if (restore_profile_enabled) {
+                clock_gettime(CLOCK_MONOTONIC, &phase_end);
+                wasm_ckpt_record_phase_with_tid(-2, "restore_waiting_run_main",
+                                                &phase_start, &phase_end);
+            }
             printf("main thread wake up!\n");
 
             // リストア完了時間の計測(終了)
             clock_gettime(CLOCK_MONOTONIC, &endAt);
-            fprintf(stderr, "restore done:%lu\n", get_time(startAt, endAt));
+            if (restore_profile_enabled) {
+                wasm_ckpt_record_phase_with_tid(-2, "restore_total_main",
+                                                &startAt, &endAt);
+                wasm_ckpt_profile_flush_restore_events();
+            }
+            else {
+                fprintf(stderr, "restore done:%lu\n", get_time(startAt, endAt));
+            }
 
             if (is_wait_restore_phase) {
                 int wait_type = POP_I32();
@@ -2025,6 +2100,11 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
             set_restore_flag(false);
             FETCH_OPCODE_AND_DISPATCH();
         } else {
+            struct timespec worker_restore_start, worker_restore_end;
+            struct timespec wait_start, wait_end;
+            if (restore_profile_enabled) {
+                clock_gettime(CLOCK_MONOTONIC, &worker_restore_start);
+            }
             printf("メインスレッドじゃない: %lu and SIG_RESTORE\n", pthread_self());
             ThreadStartArg *cur_thread_arg = (ThreadStartArg *)exec_env->thread_arg;
             printf("%d Started interpretor\n", cur_thread_arg->thread_id);
@@ -2040,7 +2120,9 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
             frame = wasm_restore_stack(&exec_env, file_prefix);
             printf("%d restore stack done\n", thread_arg->thread_id);
             clock_gettime(CLOCK_MONOTONIC, &ts2);
-            fprintf(stderr, "stack, %lu\n", get_time(ts1, ts2));
+            if (!restore_profile_enabled) {
+                fprintf(stderr, "stack, %lu\n", get_time(ts1, ts2));
+            }
             if (frame == NULL) {
                 perror("Error:wasm_interp_func_bytecode:frame is NULL\n");
                 return;
@@ -2082,12 +2164,26 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
             printf("%d done checkpoint\n", cur_thread_arg->thread_id);
             wasm_cluster_increase_checkpointing_counter(exec_env->cluster);
             printf("[waiting_run enter] tid=%d host=%lu\n", cur_thread_arg->thread_id, (unsigned long)pthread_self());
+            if (restore_profile_enabled) {
+                clock_gettime(CLOCK_MONOTONIC, &wait_start);
+            }
             os_mutex_lock(&exec_env->wait_lock);
             wasm_cluster_thread_waiting_run(exec_env);                 \
             os_mutex_unlock(&exec_env->wait_lock);
+            if (restore_profile_enabled) {
+                clock_gettime(CLOCK_MONOTONIC, &wait_end);
+                wasm_ckpt_record_phase(exec_env, "restore_waiting_run_worker",
+                                       &wait_start, &wait_end);
+            }
             printf("[waiting_run end] tid=%d host=%lu\n", cur_thread_arg->thread_id, (unsigned long)pthread_self());
             printf("%d: thread run\n", cur_thread_arg->thread_id);
             printf("線形メモリ：%p\n", memory->memory_data);
+            if (restore_profile_enabled) {
+                clock_gettime(CLOCK_MONOTONIC, &worker_restore_end);
+                wasm_ckpt_record_phase(exec_env, "restore_total_worker",
+                                       &worker_restore_start,
+                                       &worker_restore_end);
+            }
             if (is_wait_restore_phase) {
                 int wait_type = POP_I32();
                 if(wait_type == 32) {
@@ -2119,9 +2215,10 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
             HANDLE_OP(WASM_OP_NOP) {
                 // NOPでチェックポイント
                 clock_gettime(CLOCK_MONOTONIC, &startAtNop);
+                printf("スレッド生成を開始します！ 時間：%ld.%09ld\n", startAtNop.tv_sec, startAtNop.tv_nsec);
                 os_thread_create(&checkpoint_thread, checkpoint_thread_routine, exec_env->cluster,
                                  APP_THREAD_STACK_SIZE_DEFAULT);
-                // printf("nop\n");
+                printf("nop\n");
                 HANDLE_OP_END();
             }
 

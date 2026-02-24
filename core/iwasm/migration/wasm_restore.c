@@ -139,6 +139,8 @@ wasm_restore_stack(WASMExecEnv **_exec_env, char* file_prefix)
 {
     printf("restore stack\n");
     WASMExecEnv *exec_env = *_exec_env;
+    bool profile_enabled = wasm_ckpt_profile_is_enabled();
+    struct timespec restore_stack_start, restore_stack_end;
     WASMModuleInstance *module_inst =
         (WASMModuleInstance *)exec_env->module_inst;
     WASMInterpFrame *frame, *prev_frame = wasm_exec_env_get_cur_frame(exec_env);
@@ -148,6 +150,9 @@ wasm_restore_stack(WASMExecEnv **_exec_env, char* file_prefix)
     FILE *fp;
 
     uint32 frame_stack_size;
+    if (profile_enabled) {
+        clock_gettime(CLOCK_MONOTONIC, &restore_stack_start);
+    }
     char file_name_frame[MAX_FILE_NAME_LENGTH] = "frame_count.img";
     str_add_prefix(file_name_frame, file_prefix);
     fp = open_image(file_name_frame, "rb");
@@ -191,6 +196,11 @@ wasm_restore_stack(WASMExecEnv **_exec_env, char* file_prefix)
 
     _exec_env = &exec_env;
     printf("done wasm_restore_stack\n");
+    if (profile_enabled) {
+        clock_gettime(CLOCK_MONOTONIC, &restore_stack_end);
+        wasm_ckpt_record_phase(exec_env, "restore_stack", &restore_stack_start,
+                               &restore_stack_end);
+    }
 
     return frame;
 }
@@ -306,13 +316,25 @@ int wasm_restore(WASMModuleInstance **module,
             char* file_prefix)
 {
     struct timespec ts1, ts2;
+    bool profile_enabled = wasm_ckpt_profile_is_enabled();
+    struct timespec restore_core_start, restore_core_end;
+    WASMExecEnv *cur_exec_env = exec_env ? *exec_env : NULL;
+
+    if (profile_enabled) {
+        clock_gettime(CLOCK_MONOTONIC, &restore_core_start);
+    }
     // メインスレッドのみ復元
     if (strcmp(file_prefix, MAIN_THREAD_PREFIX) == 0) {
         // restore memory
         clock_gettime(CLOCK_MONOTONIC, &ts1);
         wasm_restore_memory(*module, memory, maddr, file_prefix);
         clock_gettime(CLOCK_MONOTONIC, &ts2);
-        fprintf(stderr, "memory, %lu\n", get_time(ts1, ts2));
+        if (profile_enabled) {
+            wasm_ckpt_record_phase(cur_exec_env, "restore_memory", &ts1, &ts2);
+        }
+        else {
+            fprintf(stderr, "memory, %lu\n", get_time(ts1, ts2));
+        }
         // printf("Success to restore linear memory\n");
     }
 
@@ -320,15 +342,30 @@ int wasm_restore(WASMModuleInstance **module,
     clock_gettime(CLOCK_MONOTONIC, &ts1);
     wasm_restore_global(*module, *globals, global_data, global_addr, file_prefix);
     clock_gettime(CLOCK_MONOTONIC, &ts2);
-    fprintf(stderr, "global, %lu\n", get_time(ts1, ts2));
+    if (profile_enabled) {
+        wasm_ckpt_record_phase(cur_exec_env, "restore_global", &ts1, &ts2);
+    }
+    else {
+        fprintf(stderr, "global, %lu\n", get_time(ts1, ts2));
+    }
     // printf("Success to restore globals\n");
 
     // restore program counter
     clock_gettime(CLOCK_MONOTONIC, &ts1);
     wasm_restore_program_counter(*module, frame_ip, file_prefix);
     clock_gettime(CLOCK_MONOTONIC, &ts2);
-    fprintf(stderr, "program counter, %lu\n", get_time(ts1, ts2));
+    if (profile_enabled) {
+        wasm_ckpt_record_phase(cur_exec_env, "restore_pc", &ts1, &ts2);
+    }
+    else {
+        fprintf(stderr, "program counter, %lu\n", get_time(ts1, ts2));
+    }
     // printf("Success to program counter\n");
+    if (profile_enabled) {
+        clock_gettime(CLOCK_MONOTONIC, &restore_core_end);
+        wasm_ckpt_record_phase(cur_exec_env, "restore_core", &restore_core_start,
+                               &restore_core_end);
+    }
 
     return 0;
 }

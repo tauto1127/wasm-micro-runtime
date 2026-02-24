@@ -2,6 +2,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <inttypes.h>
+#include <stdint.h>
 
 #include "platform_api_extension.h"
 #include "platform_api_vmcore.h"
@@ -19,6 +21,8 @@
 // nopで測定用
 struct timespec startAtNop;
 struct timespec endAtNop;
+static struct timespec g_ckpt_thread_entry_ts;
+static bool g_ckpt_thread_entry_valid = false;
 
 int* wait_thread_ids = NULL;
 int wait_thread_ids_count = 0;
@@ -54,6 +58,316 @@ FILE* open_image(const char* file, const char* flag) {
         return NULL;
     }
     return fp;
+}
+
+static bool
+ckpt_profile_enabled(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0) {
+        const char *env = getenv("NOP_CKPT");
+        enabled = (env && strcmp(env, "1") == 0) ? 1 : 0;
+    }
+
+    return enabled == 1;
+}
+
+static bool
+ckpt_log_enabled(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0) {
+        const char *env = getenv("NOP_CKPT_LOG");
+        enabled = (env && strcmp(env, "1") == 0) ? 1 : 0;
+    }
+
+    return enabled == 1;
+}
+
+static uint64_t
+ckpt_timespec_to_ns(const struct timespec *ts)
+{
+    return (uint64_t)ts->tv_sec * (uint64_t)1000000000ULL
+           + (uint64_t)ts->tv_nsec;
+}
+
+static uint64_t
+ckpt_now_ns(clockid_t clk_id)
+{
+    struct timespec ts;
+
+    if (clock_gettime(clk_id, &ts) != 0) {
+        return 0;
+    }
+
+    return ckpt_timespec_to_ns(&ts);
+}
+
+static bool
+build_profile_csv_name(char *out, size_t out_sz, const char *prefix)
+{
+    struct timespec ts;
+    struct tm tm_info;
+    time_t wall_time;
+    char stamp[15] = { 0 };
+    int len;
+    const char *name_prefix = prefix ? prefix : "ckpt_events";
+
+    if (!out || out_sz == 0) {
+        return false;
+    }
+
+    if (clock_gettime(CLOCK_REALTIME, &ts) != 0) {
+        goto fallback;
+    }
+
+    wall_time = (time_t)ts.tv_sec;
+    if (!localtime_r(&wall_time, &tm_info)) {
+        goto fallback;
+    }
+
+    if (strftime(stamp, sizeof(stamp), "%Y%m%d%H%M%S", &tm_info) == 0) {
+        goto fallback;
+    }
+
+    len = snprintf(out, out_sz, "%s_%s.csv", name_prefix, stamp);
+    return len > 0 && (size_t)len < out_sz;
+
+fallback:
+    len = snprintf(out, out_sz, "%s_19700101000000.csv", name_prefix);
+    return len > 0 && (size_t)len < out_sz;
+}
+
+typedef struct CkptProfileEvent {
+    int thread_id;
+    char phase[32];
+    uint64_t start_ns;
+    uint64_t end_ns;
+} CkptProfileEvent;
+
+static korp_mutex g_ckpt_profile_lock;
+static bool g_ckpt_profile_lock_inited = false;
+static CkptProfileEvent *g_ckpt_profile_events = NULL;
+static uint32 g_ckpt_profile_event_count = 0;
+static uint32 g_ckpt_profile_event_capacity = 0;
+
+static void
+ckpt_profile_init_store(void)
+{
+    if (!g_ckpt_profile_lock_inited) {
+        os_mutex_init(&g_ckpt_profile_lock);
+        g_ckpt_profile_lock_inited = true;
+    }
+}
+
+static void
+ckpt_profile_reset_events(void)
+{
+    ckpt_profile_init_store();
+    os_mutex_lock(&g_ckpt_profile_lock);
+    g_ckpt_profile_event_count = 0;
+    os_mutex_unlock(&g_ckpt_profile_lock);
+}
+
+static void
+ckpt_emit_csv(int thread_id, const char *phase, uint64_t start_ns, uint64_t end_ns)
+{
+    CkptProfileEvent *new_events;
+    CkptProfileEvent *event;
+    uint32 new_capacity;
+
+    if (!ckpt_profile_enabled() || !phase) {
+        return;
+    }
+
+    if (end_ns < start_ns) {
+        end_ns = start_ns;
+    }
+
+    ckpt_profile_init_store();
+    os_mutex_lock(&g_ckpt_profile_lock);
+
+    if (g_ckpt_profile_event_count == g_ckpt_profile_event_capacity) {
+        new_capacity = g_ckpt_profile_event_capacity > 0
+                           ? g_ckpt_profile_event_capacity * 2
+                           : 32;
+        new_events = realloc(g_ckpt_profile_events,
+                             sizeof(CkptProfileEvent) * new_capacity);
+        if (!new_events) {
+            os_mutex_unlock(&g_ckpt_profile_lock);
+            return;
+        }
+        g_ckpt_profile_events = new_events;
+        g_ckpt_profile_event_capacity = new_capacity;
+    }
+
+    event = &g_ckpt_profile_events[g_ckpt_profile_event_count++];
+    event->thread_id = thread_id;
+    event->start_ns = start_ns;
+    event->end_ns = end_ns;
+    snprintf(event->phase, sizeof(event->phase), "%s", phase);
+
+    os_mutex_unlock(&g_ckpt_profile_lock);
+}
+
+static void
+ckpt_flush_csv(const char *prefix)
+{
+    char file_name[64];
+    FILE *fp;
+    long file_pos;
+    uint32 i;
+
+    if (!ckpt_profile_enabled()) {
+        return;
+    }
+
+    if (!build_profile_csv_name(file_name, sizeof(file_name), prefix)) {
+        return;
+    }
+
+    fp = open_image(file_name, "a+");
+    if (!fp) {
+        return;
+    }
+
+    if (fseek(fp, 0, SEEK_END) == 0) {
+        file_pos = ftell(fp);
+        if (file_pos == 0) {
+            fprintf(fp, "thread_id,phase,start_ns,end_ns,duration_ns\n");
+        }
+    }
+
+    ckpt_profile_init_store();
+    os_mutex_lock(&g_ckpt_profile_lock);
+    for (i = 0; i < g_ckpt_profile_event_count; i++) {
+        uint64_t duration_ns = 0;
+        CkptProfileEvent *event = &g_ckpt_profile_events[i];
+        if (event->end_ns >= event->start_ns) {
+            duration_ns = event->end_ns - event->start_ns;
+        }
+        fprintf(fp, "%d,%s,%" PRIu64 ",%" PRIu64 ",%" PRIu64 "\n",
+                event->thread_id, event->phase, event->start_ns, event->end_ns,
+                duration_ns);
+    }
+    g_ckpt_profile_event_count = 0;
+    os_mutex_unlock(&g_ckpt_profile_lock);
+
+    fclose(fp);
+}
+
+static int
+ckpt_get_thread_id(WASMExecEnv *exec_env)
+{
+    ThreadStartArg *thread_arg = (ThreadStartArg *)exec_env->thread_arg;
+    return thread_arg ? thread_arg->thread_id : -1;
+}
+
+bool
+wasm_ckpt_profile_is_enabled(void)
+{
+    return ckpt_profile_enabled();
+}
+
+void
+wasm_ckpt_profile_reset_events(void)
+{
+    if (!ckpt_profile_enabled()) {
+        return;
+    }
+    ckpt_profile_reset_events();
+}
+
+void
+wasm_ckpt_profile_flush_events(void)
+{
+    if (!ckpt_profile_enabled()) {
+        return;
+    }
+    ckpt_flush_csv("ckpt_events");
+}
+
+void
+wasm_ckpt_profile_flush_restore_events(void)
+{
+    if (!ckpt_profile_enabled()) {
+        return;
+    }
+    ckpt_flush_csv("restore_events");
+}
+
+void
+wasm_ckpt_record_phase_with_tid(int thread_id, const char *phase,
+                                const struct timespec *start_ts,
+                                const struct timespec *end_ts)
+{
+    if (!ckpt_profile_enabled() || !phase || !start_ts || !end_ts) {
+        return;
+    }
+
+    ckpt_emit_csv(thread_id, phase, ckpt_timespec_to_ns(start_ts),
+                  ckpt_timespec_to_ns(end_ts));
+}
+
+void
+wasm_ckpt_record_phase(WASMExecEnv *exec_env, const char *phase,
+                       const struct timespec *start_ts,
+                       const struct timespec *end_ts)
+{
+    int thread_id = -1;
+
+    if (exec_env) {
+        thread_id = ckpt_get_thread_id(exec_env);
+    }
+    wasm_ckpt_record_phase_with_tid(thread_id, phase, start_ts, end_ts);
+}
+
+void
+wasm_ckpt_record_dispatch_wait(WASMExecEnv *exec_env,
+                               const struct timespec *start_ts,
+                               const struct timespec *end_ts)
+{
+    wasm_ckpt_record_phase(exec_env, "ckpt_dispatch_wait", start_ts, end_ts);
+}
+
+static uint32
+ckpt_count_frame_depth(struct WASMInterpFrame *frame)
+{
+    uint32 depth = 0;
+    while (frame && frame->function) {
+        depth++;
+        frame = frame->prev_frame;
+    }
+    return depth;
+}
+
+static void
+ckpt_log_frame_summary(WASMExecEnv *exec_env, struct WASMInterpFrame *frame)
+{
+    WASMModuleInstance *module;
+    uint32 depth;
+    int thread_id;
+    int i = 0;
+    struct WASMInterpFrame *it = frame;
+
+    if (!ckpt_log_enabled() || !frame) {
+        return;
+    }
+
+    module = (WASMModuleInstance *)exec_env->module_inst;
+    thread_id = ckpt_get_thread_id(exec_env);
+    depth = ckpt_count_frame_depth(frame);
+
+    fprintf(stderr, "[ckpt-log] tid=%d frame_depth=%u\n", thread_id, depth);
+    while (it && it->function) {
+        uint32 fidx = (uint32)(it->function - module->e->functions);
+        fprintf(stderr, "[ckpt-log] tid=%d frame[%d]_fidx=%u\n",
+                thread_id, i, fidx);
+        it = it->prev_frame;
+        i++;
+    }
 }
 
 
@@ -156,7 +470,16 @@ int get_opcode_offset(uint8 *ip, uint8 *ip_lim) {
 }
 
 // TODO: コードごちゃごちゃで読めないので、整理する
-uint8* get_type_stack(uint32 fidx, uint32 offset, uint32* type_stack_size, bool is_return_address) {
+uint8* get_type_stack(uint32 fidx, uint32 offset, uint32* type_stack_size,
+                      bool is_return_address, int thread_id) {
+    uint64_t phase_start_ns = 0;
+    uint64_t phase_end_ns = 0;
+    bool profile_enabled = ckpt_profile_enabled();
+
+    if (profile_enabled) {
+        phase_start_ns = ckpt_now_ns(CLOCK_MONOTONIC);
+    }
+
     FILE *tablemap_func = open_image("tablemap_func", "rb");
     if (!tablemap_func) printf("not found tablemap_func\n");
     FILE *tablemap_offset = open_image("tablemap_offset", "rb");
@@ -218,16 +541,30 @@ uint8* get_type_stack(uint32 fidx, uint32 offset, uint32* type_stack_size, bool 
     fclose(tablemap_offset);
     fclose(type_table);
 
+    if (profile_enabled) {
+        phase_end_ns = ckpt_now_ns(CLOCK_MONOTONIC);
+        ckpt_emit_csv(thread_id, "dump_stack_type_stack", phase_start_ns,
+                      phase_end_ns);
+    }
+
     *type_stack_size = locals_size + stack_size;
     return type_stack;
 }
 
 /* wasm_dump */
 static void
-_dump_stack(WASMExecEnv *exec_env, struct WASMInterpFrame *frame, FILE *fp, bool is_top)
+_dump_stack(WASMExecEnv *exec_env, struct WASMInterpFrame *frame, FILE *fp,
+            bool is_top, int thread_id)
 {
     int i;
     WASMModuleInstance *module = exec_env->module_inst;
+    uint64_t phase_start_ns = 0;
+    uint64_t phase_end_ns = 0;
+    bool profile_enabled = ckpt_profile_enabled();
+
+    if (profile_enabled) {
+        phase_start_ns = ckpt_now_ns(CLOCK_MONOTONIC);
+    }
 
     // Entry function
     // wasm_dump_stackの方でdump
@@ -252,7 +589,8 @@ _dump_stack(WASMExecEnv *exec_env, struct WASMInterpFrame *frame, FILE *fp, bool
     uint32 fidx_now = frame->function - module->e->functions;
     uint32 offset_now = frame->ip - wasm_get_func_code(frame->function);
     // printf("[DEBUG]now addr: (%d, %d)\n", fidx_now, offset_now);
-    uint8* type_stack_from_file = get_type_stack(fidx_now, offset_now, &type_stack_size_from_file, !is_top);
+    uint8* type_stack_from_file = get_type_stack(
+        fidx_now, offset_now, &type_stack_size_from_file, !is_top, thread_id);
     fwrite(&type_stack_size_from_file, sizeof(uint32), 1, fp);
     fwrite(type_stack_from_file, sizeof(uint8), type_stack_size_from_file, fp);
     free(type_stack_from_file);
@@ -295,6 +633,12 @@ _dump_stack(WASMExecEnv *exec_env, struct WASMInterpFrame *frame, FILE *fp, bool
         // uint32 count;
         // fwrite(&csp->count, sizeof(uint32), 1, fp);
     }
+
+    if (profile_enabled) {
+        phase_end_ns = ckpt_now_ns(CLOCK_MONOTONIC);
+        ckpt_emit_csv(thread_id, "dump_stack_frame_data", phase_start_ns,
+                      phase_end_ns);
+    }
 }
 
 
@@ -303,6 +647,25 @@ wasm_dump_stack(WASMExecEnv *exec_env, struct WASMInterpFrame *frame, char* file
 {
     WASMModuleInstance *module =
         (WASMModuleInstance *)exec_env->module_inst;
+    bool profile_enabled = ckpt_profile_enabled();
+    bool log_enabled = ckpt_log_enabled();
+    uint64_t frames_start_ns = 0;
+    uint64_t frames_end_ns = 0;
+    uint64_t frame_count_start_ns = 0;
+    uint64_t frame_count_end_ns = 0;
+    int thread_id = profile_enabled ? ckpt_get_thread_id(exec_env) : -1;
+
+    if (profile_enabled) {
+        frames_start_ns = ckpt_now_ns(CLOCK_MONOTONIC);
+    }
+    else if (log_enabled) {
+        thread_id = ckpt_get_thread_id(exec_env);
+    }
+
+    if (log_enabled) {
+        fprintf(stderr, "[ckpt-log] dump_stack begin tid=%d prefix=%s\n",
+                thread_id, file_prefix ? file_prefix : "(null)");
+    }
 
     // frameをtopからbottomまで走査する
     char file_name[MAX_FILE_NAME_LENGTH] = "";
@@ -311,7 +674,15 @@ wasm_dump_stack(WASMExecEnv *exec_env, struct WASMInterpFrame *frame, char* file
         // struct timespec startUntilDumpStack, endUntilDumpStack;
         // clock_gettime(CLOCK_REALTIME, &startUntilDumpStack);
         // dummy framenならbreak
-        if (frame->function == NULL) break;
+        if (frame->function == NULL) {
+            if (log_enabled) {
+                fprintf(stderr,
+                        "[ckpt-log] dump_stack stop tid=%d reason=dummy_frame "
+                        "written_frames=%d\n",
+                        thread_id, i);
+            }
+            break;
+        }
 
         ++i;
         sprintf(file_name, "stack%d.img", i);
@@ -319,14 +690,35 @@ wasm_dump_stack(WASMExecEnv *exec_env, struct WASMInterpFrame *frame, char* file
         FILE *fp = open_image(file_name, "wb");
 
         uint32 entry_fidx = frame->function - module->e->functions;
+        if (log_enabled) {
+            uint32 ip_offset = frame->ip - wasm_get_func_code(frame->function);
+            fprintf(stderr,
+                    "[ckpt-log] dump_stack frame tid=%d index=%d file=%s fidx=%u "
+                    "ip_off=%u value_cells=%u ctrl_cells=%u\n",
+                    thread_id, i, file_name, entry_fidx, ip_offset,
+                    (unsigned)(frame->sp - frame->sp_bottom),
+                    (unsigned)(frame->csp - frame->csp_bottom));
+        }
         fwrite(&entry_fidx, sizeof(uint32), 1, fp);
 
         // clock_gettime(CLOCK_REALTIME, &endUntilDumpStack);
         // printf("Time until dump stack file open: %lu ns\n",
         //        get_time(startUntilDumpStack, endUntilDumpStack));
-        _dump_stack(exec_env, frame, fp, (i==1));
+        _dump_stack(exec_env, frame, fp, (i==1), thread_id);
         fclose(fp);
     } while((frame = frame->prev_frame));
+
+    if (log_enabled) {
+        fprintf(stderr, "[ckpt-log] dump_stack end tid=%d total_frames=%d\n",
+                thread_id, i);
+    }
+
+    if (profile_enabled) {
+        frames_end_ns = ckpt_now_ns(CLOCK_MONOTONIC);
+        ckpt_emit_csv(thread_id, "dump_stack_frames", frames_start_ns,
+                      frames_end_ns);
+        frame_count_start_ns = ckpt_now_ns(CLOCK_MONOTONIC);
+    }
 
     char frame_count_file_name[MAX_FILE_NAME_LENGTH] = "frame_count.img";
     str_add_prefix(frame_count_file_name, file_prefix);
@@ -334,6 +726,12 @@ wasm_dump_stack(WASMExecEnv *exec_env, struct WASMInterpFrame *frame, char* file
     FILE *fp = open_image(frame_count_file_name, "wb");
     fwrite(&i, sizeof(uint32), 1, fp);
     fclose(fp);
+
+    if (profile_enabled) {
+        frame_count_end_ns = ckpt_now_ns(CLOCK_MONOTONIC);
+        ckpt_emit_csv(thread_id, "dump_stack_frame_count",
+                      frame_count_start_ns, frame_count_end_ns);
+    }
 
     return 0;
 }
@@ -624,11 +1022,28 @@ int wasm_dump(WASMExecEnv *exec_env,
 {
     int rc;
     struct timespec ts1, ts2;
+    bool profile_enabled = ckpt_profile_enabled();
+    int thread_id = -1;
+    uint64_t dump_start_ns = 0;
+    uint64_t dump_end_ns = 0;
+
+    if (profile_enabled) {
+        thread_id = ckpt_get_thread_id(exec_env);
+        dump_start_ns = ckpt_now_ns(CLOCK_MONOTONIC);
+    }
+    ckpt_log_frame_summary(exec_env, frame);
+
     // dump linear memory
     clock_gettime(CLOCK_MONOTONIC, &ts1);
     rc = wasm_dump_memory(memory, file_prefix);
     clock_gettime(CLOCK_MONOTONIC, &ts2);
-    fprintf(stderr, "%smemory, %lu\n", file_prefix, get_time(ts1, ts2));
+    if (profile_enabled) {
+        ckpt_emit_csv(thread_id, "dump_memory",
+                      ckpt_timespec_to_ns(&ts1), ckpt_timespec_to_ns(&ts2));
+    }
+    else {
+        fprintf(stderr, "%smemory, %lu\n", file_prefix, get_time(ts1, ts2));
+    }
     if (rc < 0) {
         LOG_ERROR("Failed to dump linear memory\n");
         return rc;
@@ -638,7 +1053,13 @@ int wasm_dump(WASMExecEnv *exec_env,
     clock_gettime(CLOCK_MONOTONIC, &ts1);
     rc = wasm_dump_global(module, globals, global_data, file_prefix);
     clock_gettime(CLOCK_MONOTONIC, &ts2);
-    fprintf(stderr, "%sglobal, %lu\n", file_prefix, get_time(ts1, ts2));
+    if (profile_enabled) {
+        ckpt_emit_csv(thread_id, "dump_global",
+                      ckpt_timespec_to_ns(&ts1), ckpt_timespec_to_ns(&ts2));
+    }
+    else {
+        fprintf(stderr, "%sglobal, %lu\n", file_prefix, get_time(ts1, ts2));
+    }
     if (rc < 0) {
         LOG_ERROR("Failed to dump globals\n");
         return rc;
@@ -648,7 +1069,14 @@ int wasm_dump(WASMExecEnv *exec_env,
     clock_gettime(CLOCK_MONOTONIC, &ts1);
     rc = wasm_dump_program_counter(module, cur_func, frame_ip, file_prefix);
     clock_gettime(CLOCK_MONOTONIC, &ts2);
-    fprintf(stderr, "%sprogram counter, %lu\n", file_prefix, get_time(ts1, ts2));
+    if (profile_enabled) {
+        ckpt_emit_csv(thread_id, "dump_pc",
+                      ckpt_timespec_to_ns(&ts1), ckpt_timespec_to_ns(&ts2));
+    }
+    else {
+        fprintf(stderr, "%sprogram counter, %lu\n", file_prefix,
+                get_time(ts1, ts2));
+    }
     if (rc < 0) {
         LOG_ERROR("Failed to dump program_counter\n");
         return rc;
@@ -658,7 +1086,13 @@ int wasm_dump(WASMExecEnv *exec_env,
     clock_gettime(CLOCK_MONOTONIC, &ts1);
     rc = wasm_dump_stack(exec_env, frame, file_prefix);
     clock_gettime(CLOCK_MONOTONIC, &ts2);
-    fprintf(stderr, "%sstack, %lu\n", file_prefix, get_time(ts1, ts2));
+    if (profile_enabled) {
+        ckpt_emit_csv(thread_id, "dump_stack",
+                      ckpt_timespec_to_ns(&ts1), ckpt_timespec_to_ns(&ts2));
+    }
+    else {
+        fprintf(stderr, "%sstack, %lu\n", file_prefix, get_time(ts1, ts2));
+    }
     if (rc < 0) {
         LOG_ERROR("Failed to dump frame\n");
         return rc;
@@ -668,10 +1102,21 @@ int wasm_dump(WASMExecEnv *exec_env,
     clock_gettime(CLOCK_MONOTONIC, &ts1);
     rc = wasm_dump_thread_states(exec_env, file_prefix);
     clock_gettime(CLOCK_MONOTONIC, &ts2);
-    fprintf(stderr, "%sthread attrs, %lu\n", file_prefix, get_time(ts1, ts2));
+    if (profile_enabled) {
+        ckpt_emit_csv(thread_id, "dump_thread_state",
+                      ckpt_timespec_to_ns(&ts1), ckpt_timespec_to_ns(&ts2));
+    }
+    else {
+        fprintf(stderr, "%sthread attrs, %lu\n", file_prefix, get_time(ts1, ts2));
+    }
     if (rc < 0) {
         LOG_ERROR("Failed to dump thread attrs\n");
         return rc;
+    }
+
+    if (profile_enabled) {
+        dump_end_ns = ckpt_now_ns(CLOCK_MONOTONIC);
+        ckpt_emit_csv(thread_id, "dump_total", dump_start_ns, dump_end_ns);
     }
 
     LOG_VERBOSE("Success to dump img for wamr\n");
@@ -696,13 +1141,42 @@ bool wasm_get_checkpoint() {
 #endif // WASM_ENABLE_FAST_INTERP
        // 
 void* checkpoint_thread_routine(void* arg) {
-    WASMCluster *cluster = (WASMCluster *)arg; 
+    WASMCluster *cluster = (WASMCluster *)arg;
+
+#if WASM_ENABLE_FAST_INTERP == 0
+    if (ckpt_profile_enabled()) {
+        clock_gettime(CLOCK_MONOTONIC, &g_ckpt_thread_entry_ts);
+        g_ckpt_thread_entry_valid = true;
+    }
+    else {
+        g_ckpt_thread_entry_valid = false;
+    }
+#endif
+
     checkpoint_routine(cluster);
     return NULL;
 }
        
 void checkpoint_routine(WASMCluster *cluster) {
     struct timespec startAt, endAt;
+    bool profile_enabled = ckpt_profile_enabled();
+    uint64_t entry_ns = 0;
+    uint64_t sync_start_ns = 0;
+    uint64_t sync_end_ns = 0;
+
+    if (profile_enabled) {
+        ckpt_profile_reset_events();
+        entry_ns = ckpt_now_ns(CLOCK_MONOTONIC);
+        if (g_ckpt_thread_entry_valid) {
+            ckpt_emit_csv(-2, "ckpt_thread_create",
+                          ckpt_timespec_to_ns(&startAtNop),
+                          ckpt_timespec_to_ns(&g_ckpt_thread_entry_ts));
+            g_ckpt_thread_entry_valid = false;
+        }
+        ckpt_emit_csv(-2, "ckpt_trigger", ckpt_timespec_to_ns(&startAtNop),
+                      entry_ns);
+    }
+
     // dump linear memory
     // clock_gettime(CLOCK_MONOTONIC, &startAt);
     int waits = wasm_cluster_get_waiting_thread_count(cluster);
@@ -713,6 +1187,9 @@ void checkpoint_routine(WASMCluster *cluster) {
     // printf("=======スレッドの同時停止開始=========\n");
     // printf("トータルスレッド数：%d, 待機中スレッド数：%d\n", counts, waits);
     // 停止シグナル
+    if (profile_enabled) {
+        sync_start_ns = ckpt_now_ns(CLOCK_MONOTONIC);
+    }
     wasm_cluster_send_signal_all(cluster, WAMR_SIG_CHECKPOINT);
     // wasm_cluster_send_signal_all(cluster, WAMR_SIG_CHECKPOINT);
     os_mutex_lock(&counter->lock);
@@ -756,6 +1233,10 @@ void checkpoint_routine(WASMCluster *cluster) {
         }
         os_cond_wait(&counter->cond, &counter->lock);
     };
+    if (profile_enabled) {
+        sync_end_ns = ckpt_now_ns(CLOCK_MONOTONIC);
+        ckpt_emit_csv(-2, "ckpt_sync", sync_start_ns, sync_end_ns);
+    }
 
     // ========チェックポイント開始========
     // printf("======start checkpoint========\n");
@@ -775,9 +1256,16 @@ void checkpoint_routine(WASMCluster *cluster) {
         os_cond_wait(&counter->cond, &counter->lock);
     };
     clock_gettime(CLOCK_MONOTONIC, &endAtNop);
-    printf("checkpoint time(nopから): %lu ns\n", get_time(startAtNop, endAtNop));
-    // clock_gettime(CLOCK_MONOTONIC, &endAt);
-    fprintf(stderr, "checkpoint done:%lu\n", get_time(startAt, endAt));
+    if (profile_enabled) {
+        ckpt_emit_csv(-2, "ckpt_total", ckpt_timespec_to_ns(&startAtNop),
+                      ckpt_timespec_to_ns(&endAtNop));
+        ckpt_flush_csv("ckpt_events");
+    }
+    else {
+        printf("checkpoint time(nopから): %lu ns\n", get_time(startAtNop, endAtNop));
+        // clock_gettime(CLOCK_MONOTONIC, &endAt);
+        fprintf(stderr, "checkpoint done:%lu\n", get_time(startAt, endAt));
+    }
 
     exit(0);
 }
