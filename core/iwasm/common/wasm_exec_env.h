@@ -21,9 +21,9 @@ struct WASMInterpFrame;
 
 #if WASM_ENABLE_THREAD_MGR != 0
 typedef struct WASMCluster WASMCluster;
-#if WASM_ENABLE_DEBUG_INTERP != 0
+// #if WASM_ENABLE_DEBUG_INTERP != 0
 typedef struct WASMCurrentEnvStatus WASMCurrentEnvStatus;
-#endif
+// #endif
 #endif
 
 #ifdef OS_ENABLE_HW_BOUND_CHECK
@@ -116,9 +116,9 @@ typedef struct WASMExecEnv {
     bool thread_is_detached;
 #endif
 
-#if WASM_ENABLE_DEBUG_INTERP != 0
+// #if WASM_ENABLE_DEBUG_INTERP != 0
     WASMCurrentEnvStatus *current_status;
-#endif
+// #endif
 
     /* attachment for native function */
     void *attachment;

@@ -427,7 +427,8 @@ wasm_unload(WASMModule *module);
 WASMModuleInstance *
 wasm_instantiate(WASMModule *module, WASMModuleInstance *parent,
                  WASMExecEnv *exec_env_main, uint32 stack_size,
-                 uint32 heap_size, char *error_buf, uint32 error_buf_size);
+                 uint32 heap_size, char *error_buf, uint32 error_buf_size,
+                 bool skip_post_instantiate);
 
 void
 wasm_dump_perf_profiling(const WASMModuleInstance *module_inst);

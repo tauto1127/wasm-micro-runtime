@@ -44,9 +44,33 @@ wasm_cluster_set_max_thread_num(uint32 num)
         cluster_max_thread_num = num;
 }
 
+static void
+noop_usr_handler(int signo)
+{
+    (void)signo;
+}
+
 bool
 thread_manager_init()
 {
+    /* Block SIGUSR1/SIGUSR2 in the main thread so newly spawned threads
+     * inherit the mask; a dedicated sigwait thread will consume them. */
+    sigset_t set;
+    sigemptyset(&set);
+    sigaddset(&set, SIGUSR1);
+    sigaddset(&set, SIGUSR2);
+    pthread_sigmask(SIG_BLOCK, &set, NULL);
+
+    /* Install no-op handlers to avoid default terminate if a thread
+     * temporarily unmasks these signals. Blocked signals still work with
+     * sigwait. */
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = noop_usr_handler;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGUSR1, &sa, NULL);
+    sigaction(SIGUSR2, &sa, NULL);
+
     if (bh_list_init(cluster_list) != 0)
         return false;
     if (os_mutex_init(&cluster_list_lock) != 0)
@@ -521,7 +545,7 @@ wasm_cluster_spawn_exec_env(WASMExecEnv *exec_env)
     }
 
     if (!(new_module_inst = wasm_runtime_instantiate_internal(
-              module, module_inst, exec_env, stack_size, 0, NULL, 0))) {
+              module, module_inst, exec_env, stack_size, 0, NULL, 0, false))) {
         return NULL;
     }
 
@@ -724,6 +748,13 @@ wasm_cluster_create_thread(WASMExecEnv *exec_env,
 
     /* Inherit suspend_flags of parent thread */
     new_exec_env->suspend_flags.flags = exec_env->suspend_flags.flags;
+#if WASM_ENABLE_DEBUG_INTERP != 0
+    /* もし親execenvがWAMR_RESTOREシグナルを持つなら，それを継承する */
+    if (wasm_cluster_get_thread_signal(exec_env) == WAMR_SIG_RESTORE) {
+        BH_ATOMIC_32_STORE(new_exec_env->current_status->signal_flag,
+                           WAMR_SIG_RESTORE);
+    }
+#endif
 
     if (!wasm_cluster_add_exec_env(cluster, new_exec_env))
         goto fail2;
@@ -809,7 +840,7 @@ wasm_cluster_dup_c_api_imports(WASMModuleInstanceCommon *module_inst_dst,
     return true;
 }
 
-#if WASM_ENABLE_DEBUG_INTERP != 0
+// #if WASM_ENABLE_DEBUG_INTERP != 0
 WASMCurrentEnvStatus *
 wasm_cluster_create_exenv_status()
 {
@@ -838,6 +869,12 @@ wasm_cluster_thread_is_running(WASMExecEnv *exec_env)
            || exec_env->current_status->running_status == STATUS_STEP;
 }
 
+inline void
+wasm_cluster_thread_checkpoint_ready(WASMExecEnv *exec_env)
+{
+    exec_env->current_status->running_status = STATUS_CHECKPOINT_READY;
+}
+
 void
 wasm_cluster_clear_thread_signal(WASMExecEnv *exec_env)
 {
@@ -849,6 +886,8 @@ wasm_cluster_thread_send_signal(WASMExecEnv *exec_env, uint32 signo)
 {
     exec_env->current_status->signal_flag = signo;
 }
+
+#if WASM_ENABLE_DEBUG_INTERP != 0
 
 static void
 notify_debug_instance(WASMExecEnv *exec_env)
@@ -879,6 +918,8 @@ notify_debug_instance_exit(WASMExecEnv *exec_env)
 
     on_thread_exit_event(cluster->debug_inst, exec_env);
 }
+
+#endif
 
 void
 wasm_cluster_thread_waiting_run(WASMExecEnv *exec_env)
@@ -926,6 +967,8 @@ wasm_cluster_thread_step(WASMExecEnv *exec_env)
     os_cond_signal(&exec_env->wait_cond);
     os_mutex_unlock(&exec_env->wait_lock);
 }
+
+#if WASM_ENABLE_DEBUG_INTERP != 0
 
 void
 wasm_cluster_set_debug_inst(WASMCluster *cluster, WASMDebugInstance *inst)

@@ -1572,7 +1572,8 @@ wasm_set_running_mode(WASMModuleInstance *module_inst, RunningMode running_mode)
 WASMModuleInstance *
 wasm_instantiate(WASMModule *module, WASMModuleInstance *parent,
                  WASMExecEnv *exec_env_main, uint32 stack_size,
-                 uint32 heap_size, char *error_buf, uint32 error_buf_size)
+                 uint32 heap_size, char *error_buf, uint32 error_buf_size,
+                 bool skip_post_instantiate)
 {
     WASMModuleInstance *module_inst;
     WASMGlobalInstance *globals = NULL, *global;
@@ -2089,7 +2090,8 @@ wasm_instantiate(WASMModule *module, WASMModuleInstance *parent,
                 &module_inst->e->functions[module->start_function];
     }
 
-    if (!execute_post_instantiate_functions(module_inst, is_sub_inst,
+  // 
+    if (!skip_post_instantiate && !execute_post_instantiate_functions(module_inst, is_sub_inst,
                                             exec_env_main)) {
         set_error_buf(error_buf, error_buf_size, module_inst->cur_exception);
         goto fail;

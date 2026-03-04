@@ -1346,13 +1346,17 @@ wasm_runtime_instantiate_internal(WASMModuleCommon *module,
                                   WASMModuleInstanceCommon *parent,
                                   WASMExecEnv *exec_env_main, uint32 stack_size,
                                   uint32 heap_size, char *error_buf,
-                                  uint32 error_buf_size)
+                                  uint32 error_buf_size, bool skip_post_instantiate)
 {
+    if (get_restore_flag()) {
+        skip_post_instantiate = true;
+    }
+
 #if WASM_ENABLE_INTERP != 0
     if (module->module_type == Wasm_Module_Bytecode)
         return (WASMModuleInstanceCommon *)wasm_instantiate(
             (WASMModule *)module, (WASMModuleInstance *)parent, exec_env_main,
-            stack_size, heap_size, error_buf, error_buf_size);
+            stack_size, heap_size, error_buf, error_buf_size, skip_post_instantiate);
 #endif
 #if WASM_ENABLE_AOT != 0
     if (module->module_type == Wasm_Module_AoT)
@@ -1371,7 +1375,7 @@ wasm_runtime_instantiate(WASMModuleCommon *module, uint32 stack_size,
                          uint32 error_buf_size)
 {
     return wasm_runtime_instantiate_internal(
-        module, NULL, NULL, stack_size, heap_size, error_buf, error_buf_size);
+        module, NULL, NULL, stack_size, heap_size, error_buf, error_buf_size, false);
 }
 
 void
@@ -6127,7 +6131,7 @@ wasm_runtime_sub_module_instantiate(WASMModuleCommon *module,
         WASMModuleInstanceCommon *sub_module_inst = NULL;
         sub_module_inst = wasm_runtime_instantiate_internal(
             sub_module, NULL, NULL, stack_size, heap_size, error_buf,
-            error_buf_size);
+            error_buf_size, false);
         if (!sub_module_inst) {
             LOG_DEBUG("instantiate %s failed",
                       sub_module_list_node->module_name);

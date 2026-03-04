@@ -7,10 +7,12 @@
 #define _THREAD_MANAGER_H
 
 #include "bh_common.h"
+#include "bh_atomic.h"
 #include "bh_log.h"
 #include "wasm_export.h"
 #include "../interpreter/wasm.h"
 #include "../common/wasm_runtime_common.h"
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -167,16 +169,24 @@ wasm_cluster_set_context(WASMModuleInstanceCommon *module_inst, void *key,
 bool
 wasm_cluster_is_thread_terminated(WASMExecEnv *exec_env);
 
-#if WASM_ENABLE_DEBUG_INTERP != 0
+/* CR-related signals can be referenced outside debug-interp paths. */
+#define WAMR_SIG_CHECKPOINT (20)
+#define WAMR_SIG_RESTORE (21)
+
+// #if WASM_ENABLE_DEBUG_INTERP != 0
 #define WAMR_SIG_TRAP (5)
 #define WAMR_SIG_STOP (19)
 #define WAMR_SIG_TERM (15)
 #define WAMR_SIG_SINGSTEP (0x1ff)
+// #endif
 
 #define STATUS_RUNNING (0)
 #define STATUS_STOP (1)
 #define STATUS_EXIT (2)
 #define STATUS_STEP (3)
+#define STATUS_CHECKPOINT_READY (4)
+
+#define IS_WAMR_CHECKPOINT_SIG(signo) ((signo) == WAMR_SIG_CHECKPOINT)
 
 #define IS_WAMR_TERM_SIG(signo) ((signo) == WAMR_SIG_TERM)
 
@@ -184,10 +194,15 @@ wasm_cluster_is_thread_terminated(WASMExecEnv *exec_env);
     ((signo) == WAMR_SIG_STOP || (signo) == WAMR_SIG_TRAP)
 
 struct WASMCurrentEnvStatus {
-    uint64 signal_flag : 32;
+    bh_atomic_32_t signal_flag;
     uint64 step_count : 16;
     uint64 running_status : 16;
 };
+
+static inline uint32
+wasm_cluster_get_thread_signal(const WASMExecEnv *exec_env) {
+    return BH_ATOMIC_32_LOAD(exec_env->current_status->signal_flag);
+}
 
 WASMCurrentEnvStatus *
 wasm_cluster_create_exenv_status();
@@ -219,6 +234,7 @@ wasm_cluster_thread_send_signal(WASMExecEnv *exec_env, uint32 signo);
 void
 wasm_cluster_thread_step(WASMExecEnv *exec_env);
 
+#if WASM_ENABLE_DEBUG_INTERP != 0
 void
 wasm_cluster_set_debug_inst(WASMCluster *cluster, WASMDebugInstance *inst);
 
