@@ -1,4 +1,5 @@
 #include "wasm_exec_env.h"
+#include "wasm_thread_migration.h"
 #include "thread_manager.h"
 
 // // checkpoint for thread routine
@@ -111,4 +112,15 @@ signal_control_routine(void *arg)
     }
 
     return NULL;
+}
+
+// スレッドidから，ファイルprefixを生成．メインスレッドの場合は-1を入れる．
+char* get_file_prefix(int32 thread_id) {
+    if (thread_id == -1) {
+        return MAIN_THREAD_PREFIX;
+    } else {
+        char* prefix = wasm_runtime_malloc(sizeof(char) * MAX_FILE_NAME_LENGTH); \
+        sprintf(prefix, "%d-", thread_id);
+        return prefix;
+    }
 }

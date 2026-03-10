@@ -228,6 +228,27 @@ wasm_cluster_send_signal_all(WASMCluster *cluster, uint32 signo);
 void
 wasm_cluster_thread_waiting_run(WASMExecEnv *exec_env);
 
+struct AtomicCounter*
+wasm_cluster_init_checkpointing_counter(WASMCluster *cluster, int count);
+
+int wasm_cluster_decrease_checkpointing_counter(WASMCluster *cluster);
+int wasm_cluster_increase_checkpointing_counter(WASMCluster *cluster);
+int wasm_cluster_reset_checkpointing_counter(WASMCluster *cluster);
+
+int
+wasm_cluster_get_waiting_thread_count(WASMCluster *cluster);
+
+int *
+wasm_cluster_get_waiting_thread_ids(WASMCluster *cluster);
+
+void
+wasm_cluster_wake_up_threads(WASMCluster *cluster);
+
+int
+wasm_cluster_get_thread_count(WASMCluster *cluster);
+
+int* wasm_cluster_get_thread_ids(WASMCluster *cluster);
+
 void
 wasm_cluster_wait_thread_status(WASMExecEnv *exec_env, uint32 *status);
 

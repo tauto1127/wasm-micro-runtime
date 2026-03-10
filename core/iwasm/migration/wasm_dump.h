@@ -3,6 +3,7 @@
 
 #include "../common/wasm_exec_env.h"
 #include "../interpreter/wasm_interp.h"
+#include "wasm_runtime.h"
 
 int wasm_print_program_counter(uint8 *frame_ip);
 

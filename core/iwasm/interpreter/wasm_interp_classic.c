@@ -17,6 +17,7 @@
 #include "../migration/wasm_thread_migration.h"
 #include "thread_manager.h"
 #include <wasmig/stack_tables.h>
+#include "lib_wasi_threads_wrapper.h"
 #if WASM_ENABLE_SHARED_MEMORY != 0
 #include "../common/wasm_shared_memory.h"
 #endif
@@ -1099,8 +1100,44 @@ wasm_interp_call_func_import(WASMModuleInstance *module_inst,
 
 #define HANDLE_OP(opcode) HANDLE_##opcode:
 
+#define INIT_THREAD_ID_CH()                                                  \
+    do {                                                                     \
+        ThreadStartArg *thread_arg = (ThreadStartArg *)exec_env->thread_arg; \
+        uint32 arg;                                                          \
+        if (exec_env->thread_arg != NULL) {                                  \
+            arg = thread_arg->arg;                                           \
+            int32 thread_id = thread_arg->thread_id;                         \
+            thread_id_ch = get_file_prefix(thread_id);                       \
+            printf("%sThread checkpoint started\n", thread_id_ch);           \
+        }                                                                    \
+        else {                                                               \
+            /* メインスレッド*/                                       \
+            thread_id_ch = get_file_prefix(-1);                              \
+            printf("%sThread checkpoint started\n", thread_id_ch);           \
+        }                                                                    \
+    } while (0)
+
+#if WASM_ENABLE_THREAD_MGR != 0
+#define END_CHECKPOINT()                                                \
+    do {                                                                \
+        wasm_cluster_increase_checkpointing_counter(exec_env->cluster); \
+        wasm_cluster_thread_send_signal(exec_env, WAMR_SIG_CHECKPOINT); \
+        wasm_cluster_thread_waiting_run(exec_env);                      \
+    } while (0)
+#else
+#define END_CHECKPOINT() \
+    do {                 \
+        exit(0);         \
+    } while (0)
+#endif
+
 #define DO_CHECKPOINT()                                                    \
     do {                                                                   \
+        wasm_cluster_increase_checkpointing_counter(exec_env->cluster);    \
+        wasm_cluster_thread_waiting_run(exec_env);                         \
+        char *thread_id_ch;                                                \
+        INIT_THREAD_ID_CH();                                               \
+                                                                           \
         SYNC_ALL_TO_FRAME();                                               \
         uint8 *dummy_ip;                                                   \
         uint32 *dummy_sp;                                                  \
@@ -1112,8 +1149,7 @@ wasm_interp_call_func_import(WASMModuleInstance *module_inst,
             perror("failed to dump\n");                                    \
             exit(1);                                                       \
         }                                                                  \
-        LOG_DEBUG("dispatch_count: %d\n", dispatch_count);                 \
-        exit(0);                                                           \
+        END_CHECKPOINT();                                                  \
     } while (0)
 
 #define CHECK_DUMP()                                                        \

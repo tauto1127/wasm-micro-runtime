@@ -925,7 +925,16 @@ notify_debug_instance_exit(WASMExecEnv *exec_env)
 
     on_thread_exit_event(cluster->debug_inst, exec_env);
 }
+#else
+static void notify_debug_instance(WASMExecEnv *exec_env)
+{
+    (void)exec_env;
+}
 
+static void notify_debug_instance_exit(WASMExecEnv *exec_env)
+{
+    (void)exec_env;
+}
 #endif
 
 void
