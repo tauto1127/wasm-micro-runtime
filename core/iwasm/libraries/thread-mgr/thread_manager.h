@@ -9,6 +9,7 @@
 #include "bh_common.h"
 #include "bh_atomic.h"
 #include "bh_log.h"
+#include "platform_internal.h"
 #include "wasm_export.h"
 #include "../interpreter/wasm.h"
 #include "../common/wasm_runtime_common.h"
@@ -21,6 +22,12 @@ extern "C" {
 #if WASM_ENABLE_DEBUG_INTERP != 0
 typedef struct WASMDebugInstance WASMDebugInstance;
 #endif
+
+struct AtomicCounter {
+    int checkpoint_count;
+    korp_mutex lock;
+    korp_cond cond;
+};
 
 struct WASMCluster {
     struct WASMCluster *next;
@@ -50,6 +57,7 @@ struct WASMCluster {
      * with lock, see wams_cluster_wait_for_all and wasm_cluster_terminate_all
      */
     bool processing;
+    struct AtomicCounter *checkpoint_counter;
 #if WASM_ENABLE_DEBUG_INTERP != 0
     WASMDebugInstance *debug_inst;
 #endif
@@ -200,7 +208,8 @@ struct WASMCurrentEnvStatus {
 };
 
 static inline uint32
-wasm_cluster_get_thread_signal(const WASMExecEnv *exec_env) {
+wasm_cluster_get_thread_signal(const WASMExecEnv *exec_env)
+{
     return BH_ATOMIC_32_LOAD(exec_env->current_status->signal_flag);
 }
 
@@ -233,6 +242,12 @@ wasm_cluster_thread_send_signal(WASMExecEnv *exec_env, uint32 signo);
 
 void
 wasm_cluster_thread_step(WASMExecEnv *exec_env);
+
+struct AtomicCounter *
+wasm_cluster_init_checkpointing_counter(WASMCluster *cluster, int count);
+
+int
+wasm_cluster_decrease_checkpointing_counter(WASMCluster *cluster);
 
 #if WASM_ENABLE_DEBUG_INTERP != 0
 void

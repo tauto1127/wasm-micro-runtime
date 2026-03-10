@@ -16,5 +16,4 @@ int wasm_dump(WASMExecEnv *exec_env,
          register uint8 *frame_ip);
 
 int64_t get_time(struct timespec ts1, struct timespec ts2);
-
 #endif // _WASM_CHECKPOINT_H

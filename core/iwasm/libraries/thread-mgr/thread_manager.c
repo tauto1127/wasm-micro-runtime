@@ -5,6 +5,13 @@
 
 #include "thread_manager.h"
 #include "../common/wasm_c_api_internal.h"
+#include "bh_list.h"
+#include "platform_api_extension.h"
+#include "platform_api_vmcore.h"
+#include "wasm_exec_env.h"
+#include "wasm_export.h"
+#include "lib_wasi_threads_wrapper.h"
+#include "wasm_thread_migration.h"
 
 #if WASM_ENABLE_INTERP != 0
 #include "../interpreter/wasm_runtime.h"
@@ -966,6 +973,132 @@ wasm_cluster_thread_step(WASMExecEnv *exec_env)
     exec_env->current_status->running_status = STATUS_STEP;
     os_cond_signal(&exec_env->wait_cond);
     os_mutex_unlock(&exec_env->wait_lock);
+}
+
+struct AtomicCounter *
+wasm_cluster_init_checkpointing_counter(WASMCluster *cluster, int count)
+{
+    if (!cluster) {
+        return NULL;
+    }
+
+    // checkpoint_counterがすでに初期化されている場合
+    if (cluster->checkpoint_counter != NULL) {
+        os_mutex_lock(&cluster->checkpoint_counter->lock);
+        cluster->checkpoint_counter->checkpoint_count = count;
+        os_mutex_unlock(&cluster->checkpoint_counter->lock);
+
+        return cluster->checkpoint_counter;
+    }
+    // checkpoint_counterが初期化されていない場合
+    struct AtomicCounter *counter =
+        wasm_runtime_malloc(sizeof(struct AtomicCounter));
+    if (!counter) {
+        return NULL;
+    }
+    counter->checkpoint_count = count;
+    os_mutex_init(&counter->lock);
+    os_cond_init(&counter->cond);
+    os_mutex_lock(&cluster->lock);
+    cluster->checkpoint_counter = counter;
+    os_mutex_unlock(&cluster->lock);
+
+    return counter;
+}
+
+int
+wasm_cluster_decrease_checkpointing_counter(WASMCluster *cluster)
+{
+    if (!cluster) {
+        return -1;
+    }
+
+    os_mutex_lock(&cluster->lock);
+    struct AtomicCounter *counter = cluster->checkpoint_counter;
+    if (!counter) {
+        os_mutex_unlock(&cluster->lock);
+        return -1;
+    }
+
+    os_mutex_lock(&counter->lock);
+    counter->checkpoint_count--;
+    os_cond_signal(&counter->cond);
+    os_mutex_unlock(&counter->lock);
+
+    os_mutex_unlock(&cluster->lock);
+
+    return 0;
+}
+
+int
+wasm_cluster_increase_checkpointing_counter(WASMCluster *cluster)
+{
+    if (!cluster) {
+        return -1;
+    }
+    os_mutex_lock(&cluster->lock);
+    struct AtomicCounter *counter = cluster->checkpoint_counter;
+    if (!counter) {
+        os_mutex_unlock(&cluster->lock);
+        return -1;
+    }
+    os_mutex_lock(&counter->lock);
+    counter->checkpoint_count++;
+    os_mutex_unlock(&counter->lock);
+    os_mutex_unlock(&cluster->lock);
+    return 0;
+}
+
+int
+wasm_cluster_reset_checkpointing_counter(WASMCluster *cluster)
+{
+    if (!cluster) {
+        return -1;
+    }
+    os_mutex_lock(&cluster->lock);
+    cluster->checkpoint_counter = NULL;
+    os_mutex_unlock(&cluster->lock);
+    return 0;
+}
+
+int
+wasm_cluster_get_thread_count(WASMCluster *cluster)
+{
+    if (!cluster) {
+        return -1;
+    }
+    int count = 0;
+    os_mutex_lock(&cluster->lock);
+    count = cluster->exec_env_list.len;
+    os_mutex_unlock(&cluster->lock);
+    return count;
+}
+
+// #TODO これメインスレッドは含まないけど，含む方がいいのかも
+int *
+wasm_cluster_get_thread_ids(WASMCluster *cluster)
+{
+    if (!cluster) {
+        return NULL;
+    }
+    os_mutex_lock(&cluster->lock);
+    int *thread_ids =
+        wasm_runtime_malloc(sizeof(int) * cluster->exec_env_list.len);
+    WASMExecEnv *env = bh_list_first_elem(&cluster->exec_env_list);
+    int count = 0;
+    while (env) {
+        ThreadStartArg *arg = (ThreadStartArg *)env->thread_arg;
+        if (arg == NULL) {
+            env = bh_list_elem_next(env);
+            continue;
+        }
+        thread_ids[count++] = arg->thread_id;
+        env = bh_list_elem_next(env);
+    }
+    thread_ids[count] = -1;
+    os_mutex_unlock(&cluster->lock);
+
+    return thread_ids;
 }
 
 #if WASM_ENABLE_DEBUG_INTERP != 0

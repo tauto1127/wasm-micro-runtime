@@ -3,6 +3,7 @@
 
 // #include "../common/wasm_exec_env.h"
 #include "../interpreter/wasm_interp.h"
+#include "wasm_runtime.h"
 
 static inline uint8 *
 get_global_addr_for_migration(uint8 *global_data, WASMGlobalInstance *global)

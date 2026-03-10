@@ -14,6 +14,8 @@
 #include "../common/wasm_exec_env.h"
 #include "../migration/wasm_dump.h"
 #include "../migration/wasm_restore.h"
+#include "../migration/wasm_thread_migration.h"
+#include "thread_manager.h"
 #include <wasmig/stack_tables.h>
 #if WASM_ENABLE_SHARED_MEMORY != 0
 #include "../common/wasm_shared_memory.h"
@@ -1097,35 +1099,35 @@ wasm_interp_call_func_import(WASMModuleInstance *module_inst,
 
 #define HANDLE_OP(opcode) HANDLE_##opcode:
 
-#define DO_CHECKPOINT()                                                     \
-    do {                                                                    \
-        SYNC_ALL_TO_FRAME();                                                \
-        uint8 *dummy_ip;                                                    \
-        uint32 *dummy_sp;                                                   \
-        dummy_ip = frame_ip;                                                \
-        dummy_sp = frame_sp;                                                \
-        int rc = wasm_dump(exec_env, module, memory,                        \
-            globals, global_data, cur_func,                                 \
-            frame, dummy_ip);                                               \
-        if (rc < 0) {                                                       \
-            perror("failed to dump\n");                                     \
-            exit(1);                                                        \
-        }                                                                   \
-        LOG_DEBUG("dispatch_count: %d\n", dispatch_count);                  \
-        exit(0);                                                            \
-    } while(0)                                                              
+#define DO_CHECKPOINT()                                                    \
+    do {                                                                   \
+        SYNC_ALL_TO_FRAME();                                               \
+        uint8 *dummy_ip;                                                   \
+        uint32 *dummy_sp;                                                  \
+        dummy_ip = frame_ip;                                               \
+        dummy_sp = frame_sp;                                               \
+        int rc = wasm_dump(exec_env, module, memory, globals, global_data, \
+                           cur_func, frame, dummy_ip);                     \
+        if (rc < 0) {                                                      \
+            perror("failed to dump\n");                                    \
+            exit(1);                                                       \
+        }                                                                  \
+        LOG_DEBUG("dispatch_count: %d\n", dispatch_count);                 \
+        exit(0);                                                           \
+    } while (0)
 
 #define CHECK_DUMP()                                                        \
-    if (sig_flag) {                                                         \
+    if (IS_WAMR_CHECKPOINT_SIG(wasm_cluster_get_thread_signal(exec_env))) { \
+        printf("checkpoint\n");                                             \
         DO_CHECKPOINT();                                                    \
     }
 
 // #define FETCH_OPCODE_AND_DISPATCH() goto *handle_table[*frame_ip++]
-#define FETCH_OPCODE_AND_DISPATCH()                                     \
-do {                                                                    \
-    CHECK_DUMP()                                                        \
-    goto *handle_table[*frame_ip++];                                    \
-} while(0);
+#define FETCH_OPCODE_AND_DISPATCH()      \
+    do {                                 \
+        CHECK_DUMP()                     \
+        goto *handle_table[*frame_ip++]; \
+    } while (0);
 
 #if WASM_ENABLE_THREAD_MGR != 0 && WASM_ENABLE_DEBUG_INTERP != 0
 #define HANDLE_OP_END()                                                   \
@@ -1180,7 +1182,51 @@ get_global_addr(uint8 *global_data, WASMGlobalInstance *global)
 #endif
 }
 
-static void clear_refs() {
+#if WASM_ENABLE_THREAD_MGR != 0
+static korp_tid signal_control_tid;
+static bool signal_control_started;
+
+// マルチスレッド時にチェックポイントシグナルを受け取るためのスレッドを起動する関数
+static void
+multi_thread_checkpoint_init(WASMCluster *cluster)
+{
+    sigset_t set;
+
+    if (signal_control_started) {
+        return;
+    }
+
+    /* Block signals in this thread; handler thread will consume via sigwait */
+    sigemptyset(&set);
+    sigaddset(&set, SIGUSR1);
+    sigaddset(&set, SIGUSR2);
+    pthread_sigmask(SIG_BLOCK, &set, NULL);
+
+    if (os_thread_create(&signal_control_tid, signal_control_routine, cluster,
+                         APP_THREAD_STACK_SIZE_DEFAULT)
+        == 0) {
+        printf("signal init: %lu\n", signal_control_tid);
+        signal_control_started = true;
+    }
+}
+#endif
+
+// チェックポイントシグナルを受け取るための初期化処理
+#if WASM_ENABLE_THREAD_MGR == 0
+#define INIT_CHECKPOINT()                   \
+    do {                                    \
+        signal(SIGINT, wasm_interp_sigint); \
+    } while (0)
+#else
+#define INIT_CHECKPOINT()                                \
+    do {                                                 \
+        multi_thread_checkpoint_init(exec_env->cluster); \
+    } while (0)
+#endif
+
+static void
+clear_refs()
+{
     int fd;
     char *v = "4";
 
@@ -1206,6 +1252,8 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                                WASMFunctionInstance *cur_func,
                                WASMInterpFrame *prev_frame)
 {
+    // チェックポイントシグナル受信用スレッド
+    multi_thread_checkpoint_init(exec_env->cluster);
     WASMMemoryInstance *memory = wasm_get_default_memory(module);
 #if !defined(OS_ENABLE_HW_BOUND_CHECK)              \
     || WASM_CPU_SUPPORTS_UNALIGNED_ADDR_ACCESS == 0 \
@@ -1240,7 +1288,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
     uint8 local_type, *global_addr;
     uint32 cache_index, type_index, param_cell_num, cell_num;
     uint8 value_type;
-    
+
 #if !defined(OS_ENABLE_HW_BOUND_CHECK) \
     || WASM_CPU_SUPPORTS_UNALIGNED_ADDR_ACCESS == 0
 #if WASM_CONFIGURABLE_BOUNDS_CHECKS != 0
@@ -1266,14 +1314,15 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
 #undef HANDLE_OPCODE
 #endif
 
-    signal(SIGINT, &wasm_interp_sigint);
+    INIT_CHECKPOINT();
     // Clear soft-dirty bit
     clear_refs();
 
     // リストアの初期化時間の計測(終了)
     struct timespec ts1;
     clock_gettime(CLOCK_MONOTONIC, &ts1);
-    fprintf(stderr, "boot_end, %lu\n", (uint64_t)(ts1.tv_sec*1e9) + ts1.tv_nsec);
+    fprintf(stderr, "boot_end, %lu\n",
+            (uint64_t)(ts1.tv_sec * 1e9) + ts1.tv_nsec);
 
     if (get_restore_flag()) {
         // bool done_flag;
@@ -1304,10 +1353,11 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
         }
 
         uint8 *dummy_ip, *dummy_lp, *dummy_sp;
-        rc = wasm_restore(&module, &exec_env, &cur_func, &prev_frame,
-                        &memory, &globals, &global_data, &global_addr,
-                        &frame, &dummy_ip, &dummy_lp, &dummy_sp, &frame_csp,
-                        &frame_ip_end, &else_addr, &end_addr, &maddr, &done_flag);
+        rc = wasm_restore(&module, &exec_env, &cur_func, &prev_frame, &memory,
+                          &globals, &global_data, &global_addr, &frame,
+                          &dummy_ip, &dummy_lp, &dummy_sp, &frame_csp,
+                          &frame_ip_end, &else_addr, &end_addr, &maddr,
+                          &done_flag);
         if (rc < 0) {
             // error
             perror("failed to restore\n");
@@ -1323,8 +1373,9 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
         UPDATE_ALL_FROM_FRAME();
 
         // checkpoint after restoring the Wasm state for debugging
-        char* is_checkpoint_after_restore = getenv("CHECKPOINT_AFTER_RESTORE"); 
-        if (is_checkpoint_after_restore && (strcmp(is_checkpoint_after_restore, "1") == 0)) {
+        char *is_checkpoint_after_restore = getenv("CHECKPOINT_AFTER_RESTORE");
+        if (is_checkpoint_after_restore
+            && (strcmp(is_checkpoint_after_restore, "1") == 0)) {
             sig_flag = 1;
             goto migration_async;
         }
@@ -1344,15 +1395,14 @@ migration_async:
         uint8 *dummy_ip, *dummy_sp;
         dummy_ip = frame_ip;
         dummy_sp = frame_sp;
-        int rc = wasm_dump(exec_env, module, memory, 
-            globals, global_data, cur_func,
-            frame, dummy_ip);
+        int rc = wasm_dump(exec_env, module, memory, globals, global_data,
+                           cur_func, frame, dummy_ip);
         if (rc < 0) {
             perror("failed to dump\n");
             exit(1);
         }
         LOG_DEBUG("dispatch_count: %d\n", dispatch_count);
-        exit(0);     
+        exit(0);
     }
     FETCH_OPCODE_AND_DISPATCH();
 #endif
@@ -1363,11 +1413,13 @@ migration_async:
                 goto got_exception;
             }
 
-            HANDLE_OP(WASM_OP_NOP) { 
+            HANDLE_OP(WASM_OP_NOP)
+            {
                 // NOPでチェックポイント
-                char* env = getenv("NOP_CKPT"); 
-                if (env && (strcmp(env, "1") == 0)) sig_flag = 1;
-                HANDLE_OP_END(); 
+                char *env = getenv("NOP_CKPT");
+                if (env && (strcmp(env, "1") == 0))
+                    sig_flag = 1;
+                HANDLE_OP_END();
             }
 
             HANDLE_OP(EXT_OP_BLOCK)
@@ -3206,7 +3258,10 @@ migration_async:
             HANDLE_OP(WASM_OP_I32_REINTERPRET_F32)
             HANDLE_OP(WASM_OP_I64_REINTERPRET_F64)
             HANDLE_OP(WASM_OP_F32_REINTERPRET_I32)
-            HANDLE_OP(WASM_OP_F64_REINTERPRET_I64) { HANDLE_OP_END(); }
+            HANDLE_OP(WASM_OP_F64_REINTERPRET_I64)
+            {
+                HANDLE_OP_END();
+            }
 
             HANDLE_OP(WASM_OP_I32_EXTEND8_S)
             {

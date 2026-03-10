@@ -3,7 +3,11 @@
  * SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
  */
 
+#include "bh_hashmap.h"
 #include "bh_log.h"
+#include "platform_api_vmcore.h"
+#include "wasm_export.h"
+#include "lib_wasi_threads_wrapper.h"
 #include "wasm_shared_memory.h"
 #if WASM_ENABLE_THREAD_MGR != 0
 #include "../libraries/thread-mgr/thread_manager.h"
@@ -38,6 +42,9 @@ typedef struct AtomicWaitNode {
     bh_list_link l;
     uint8 status;
     korp_cond wait_cond;
+#if WASM_ENABLE_THREAD_MGR != 0
+    WASMExecEnv *exec_env;
+#endif
 } AtomicWaitNode;
 
 /* Atomic wait map */
@@ -433,3 +440,124 @@ wasm_runtime_atomic_notify(WASMModuleInstanceCommon *module, void *address,
 
     return notify_result;
 }
+
+#if WASM_ENABLE_THREAD_MGR != 0
+
+// static uint32
+// get_wait_node_count(void)
+// {
+//     uint32 total = 0;
+//
+//     if (wait_map) {
+//         bh_hash_map_traverse(wait_map, _wait_node_count_cb, &total);
+//     }
+//
+//     return total;
+// }
+
+HashMap *
+get_wait_map(void)
+{
+    return wait_map;
+}
+
+uint32
+wasm_shared_memory_get_waiters_count(void)
+{
+    uint32 total;
+
+    os_mutex_lock(&g_shared_memory_lock);
+    total = wasm_shared_memory_get_waiters_count();
+    os_mutex_unlock(&g_shared_memory_lock);
+
+    return (int)total;
+}
+
+typedef struct WaitTidCollectCtx {
+    int *tids;
+    int idx;
+    int cap;
+} WaitTidCollectCtx;
+
+static void
+wait_tid_collect_cb(void *key, void *value, void *user_data)
+{
+    (void)key;
+
+    AtomicWaitInfo *info = (AtomicWaitInfo *)value;
+    AtomicWaitNode *node = bh_list_first_elem(info->wait_list);
+    WaitTidCollectCtx *ctx = (WaitTidCollectCtx *)user_data;
+
+    while (node && ctx->idx < ctx->cap) {
+        int tid = -1;
+
+        if (node->exec_env && node->exec_env->thread_arg) {
+            ThreadStartArg *arg = (ThreadStartArg *)node->exec_env->thread_arg;
+            tid = arg->thread_id;
+        }
+
+        ctx->tids[ctx->idx++] = tid;
+        node = bh_list_elem_next(node);
+    }
+}
+
+int *
+get_wait_node_tids(void)
+{
+    uint32 count;
+    int *tids = NULL;
+    WaitTidCollectCtx ctx;
+
+    os_mutex_lock(&g_shared_memory_lock);
+    count = wasm_shared_memory_get_waiters_count();
+
+    tids = wasm_runtime_malloc(sizeof(int) * (count + 1));
+    if (!tids) {
+        os_mutex_unlock(&g_shared_memory_lock);
+        return NULL;
+    }
+
+    ctx.tids = tids;
+    ctx.idx = 0;
+    ctx.cap = (int)count;
+
+    if (count > 0) {
+        bh_hash_map_traverse(wait_map, wait_tid_collect_cb, &ctx);
+    }
+
+    tids[ctx.idx] = -1;
+    os_mutex_unlock(&g_shared_memory_lock);
+    return tids;
+}
+
+static void
+wake_wait_node_cb(void *key, void *value, void *user_data)
+{
+    (void)key;
+    AtomicWaitInfo *info = (AtomicWaitInfo *)value;
+    uint32 *total = (uint32 *)user_data;
+    AtomicWaitNode *node = bh_list_first_elem(info->wait_list);
+
+    while (node) {
+        node->status = S_NOTIFIED;
+        os_cond_signal(&node->wait_cond);
+        (*total)++;
+        node = bh_list_elem_next(node);
+    }
+}
+
+uint32
+wasm_shared_memory_wake_waiters(void)
+{
+    uint32 total = 0;
+
+    os_mutex_lock(&g_shared_memory_lock);
+    if (wait_map) {
+        bh_hash_map_traverse(wait_map, wake_wait_node_cb, &total);
+    }
+    os_mutex_unlock(&g_shared_memory_lock);
+
+    return total;
+}
+
+#endif

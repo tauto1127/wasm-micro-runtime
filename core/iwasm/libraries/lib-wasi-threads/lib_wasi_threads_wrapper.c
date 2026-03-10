@@ -6,6 +6,7 @@
 #include "bh_log.h"
 #include "thread_manager.h"
 #include "tid_allocator.h"
+#include "lib_wasi_threads_wrapper.h"
 
 #if WASM_ENABLE_INTERP != 0
 #include "wasm_runtime.h"
@@ -18,15 +19,6 @@
 static const char *THREAD_START_FUNCTION = "wasi_thread_start";
 static korp_mutex thread_id_lock;
 static TidAllocator tid_allocator;
-
-typedef struct {
-    /* app's entry function */
-    wasm_function_inst_t start_func;
-    /* arg of the app's entry function */
-    uint32 arg;
-    /* thread id passed to the app */
-    int32 thread_id;
-} ThreadStartArg;
 
 static int32
 allocate_thread_id()

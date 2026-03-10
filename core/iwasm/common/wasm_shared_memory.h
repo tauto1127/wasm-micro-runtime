@@ -8,6 +8,7 @@
 
 #include "bh_common.h"
 #include "../interpreter/wasm_runtime.h"
+#include "bh_hashmap.h"
 #include "wasm_runtime_common.h"
 
 #ifdef __cplusplus
@@ -21,6 +22,9 @@ wasm_shared_memory_init();
 
 void
 wasm_shared_memory_destroy();
+
+HashMap *
+get_wait_map(void);
 
 uint16
 shared_memory_inc_reference(WASMMemoryInstance *memory);
@@ -52,9 +56,18 @@ uint32
 wasm_runtime_atomic_wait(WASMModuleInstanceCommon *module, void *address,
                          uint64 expect, int64 timeout, bool wait64);
 
+
 uint32
 wasm_runtime_atomic_notify(WASMModuleInstanceCommon *module, void *address,
                            uint32 count);
+
+uint32
+wasm_shared_memory_get_waiters_count(void);
+uint32
+wasm_shared_memory_wake_waiters(void);
+
+int get_wait_node_count(void);
+int *get_wait_node_tids(void);
 
 #ifdef __cplusplus
 }
