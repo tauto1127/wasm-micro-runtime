@@ -104,6 +104,7 @@ signal_control_routine(void *arg)
         // チェックポイントシグナルが届いた時
         if (sig == SIGUSR2) {
       // 戻す
+            printf("SIGUSR2 called, %ld", pthread_self());
             // checkpoint_routine(cluster);   
         }
         else if (sig == SIGUSR1) {

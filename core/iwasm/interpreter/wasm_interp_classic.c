@@ -1131,6 +1131,7 @@ wasm_interp_call_func_import(WASMModuleInstance *module_inst,
     } while (0)
 #endif
 
+#if WASM_ENABLE_THREAD_MGR == 0
 #define DO_CHECKPOINT()                                                    \
     do {                                                                   \
         wasm_cluster_increase_checkpointing_counter(exec_env->cluster);    \
@@ -1151,12 +1152,37 @@ wasm_interp_call_func_import(WASMModuleInstance *module_inst,
         }                                                                  \
         END_CHECKPOINT();                                                  \
     } while (0)
+#else
+#define DO_CHECKPOINT()                                                    \
+    do {                                                                   \
+        SYNC_ALL_TO_FRAME();                                               \
+        uint8 *dummy_ip;                                                   \
+        uint32 *dummy_sp;                                                  \
+        dummy_ip = frame_ip;                                               \
+        dummy_sp = frame_sp;                                               \
+        int rc = wasm_dump(exec_env, module, memory, globals, global_data, \
+                           cur_func, frame, dummy_ip);                     \
+        if (rc < 0) {                                                      \
+            perror("failed to dump\n");                                    \
+            exit(1);                                                       \
+        }                                                                  \
+        LOG_DEBUG("dispatch_count: %d\n", dispatch_count);                 \
+        exit(0);                                                           \
+    } while (0)
+#endif
 
+#if WASM_ENABLE_THREAD_MGR == 0
 #define CHECK_DUMP()                                                        \
     if (IS_WAMR_CHECKPOINT_SIG(wasm_cluster_get_thread_signal(exec_env))) { \
         printf("checkpoint\n");                                             \
         DO_CHECKPOINT();                                                    \
     }
+#else
+#define CHECK_DUMP()     \
+    if (sig_flag) {      \
+        DO_CHECKPOINT(); \
+    }
+#endif
 
 // #define FETCH_OPCODE_AND_DISPATCH() goto *handle_table[*frame_ip++]
 #define FETCH_OPCODE_AND_DISPATCH()      \
@@ -1250,7 +1276,7 @@ multi_thread_checkpoint_init(WASMCluster *cluster)
 #endif
 
 // チェックポイントシグナルを受け取るための初期化処理
-#if WASM_ENABLE_THREAD_MGR == 0
+#if WASM_ENABLE_THREAD_MGR != 0
 #define INIT_CHECKPOINT()                   \
     do {                                    \
         signal(SIGINT, wasm_interp_sigint); \
