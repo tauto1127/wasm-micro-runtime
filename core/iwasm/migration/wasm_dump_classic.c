@@ -234,7 +234,8 @@ _dump_stack(WASMExecEnv *exec_env, struct WASMInterpFrame *frame,
 }
 
 int
-wasm_dump_stack(WASMExecEnv *exec_env, struct WASMInterpFrame *frame)
+wasm_dump_stack(WASMExecEnv *exec_env, struct WASMInterpFrame *frame,
+                const char *file_prefix)
 {
     WASMModuleInstance *module = (WASMModuleInstance *)exec_env->module_inst;
 
@@ -260,23 +261,25 @@ wasm_dump_stack(WASMExecEnv *exec_env, struct WASMInterpFrame *frame)
     // frame stackのサイズを保存
     CallStack cs = { .size = call_stack_size, .entries = entries };
     print_call_stack(&cs);
-    wasmig_checkpoint_stack_v4(call_stack_size, entries);
+    wasmig_checkpoint_stack_v4_with_prefix(call_stack_size, entries,
+                                           file_prefix);
     wasmig_info("Success to dump frame stack\n");
 
     return 0;
 }
 
 int
-wasm_dump_memory(WASMMemoryInstance *memory)
+wasm_dump_memory(WASMMemoryInstance *memory, const char *file_prefix)
 {
     int page_size_rate = memory->num_bytes_per_page / WASM_PAGE_SIZE;
-    wasmig_checkpoint_memory(memory->memory_data,
-                             memory->cur_page_count * page_size_rate);
+    return wasmig_checkpoint_memory_with_prefix(
+        memory->memory_data, memory->cur_page_count * page_size_rate,
+        file_prefix);
 }
 
 int
 wasm_dump_global(WASMModuleInstance *module, WASMGlobalInstance *globals,
-                 uint8 *global_data)
+                 uint8 *global_data, const char *file_prefix)
 {
     uint64_t values[module->e->global_count];
     uint32_t types[module->e->global_count];
@@ -304,15 +307,18 @@ wasm_dump_global(WASMModuleInstance *module, WASMGlobalInstance *globals,
         }
     }
 
-    wasmig_checkpoint_global(values, types, module->e->global_count);
+    return wasmig_checkpoint_global_with_prefix(values, types,
+                                                module->e->global_count,
+                                                file_prefix);
 }
 
 int
 wasm_dump_program_counter(WASMModuleInstance *module,
-                          WASMFunctionInstance *func, uint8 *frame_ip)
+                          WASMFunctionInstance *func, uint8 *frame_ip,
+                          const char *file_prefix)
 {
     CodePos pc = get_call_position(frame_ip);
-    return wasmig_checkpoint_pc(pc.fidx, pc.offset);
+    return wasmig_checkpoint_pc_with_prefix(pc.fidx, pc.offset, file_prefix);
 }
 
 int
@@ -321,12 +327,23 @@ wasm_dump(WASMExecEnv *exec_env, WASMModuleInstance *module,
           uint8 *global_data, WASMFunctionInstance *cur_func,
           struct WASMInterpFrame *frame, register uint8 *frame_ip)
 {
+    return wasm_dump_with_prefix(exec_env, module, memory, globals,
+                                 global_data, cur_func, frame, frame_ip, NULL);
+}
+
+int
+wasm_dump_with_prefix(WASMExecEnv *exec_env, WASMModuleInstance *module,
+                      WASMMemoryInstance *memory, WASMGlobalInstance *globals,
+                      uint8 *global_data, WASMFunctionInstance *cur_func,
+                      struct WASMInterpFrame *frame, register uint8 *frame_ip,
+                      const char *file_prefix)
+{
     int rc;
     struct timespec ts1, ts2;
 
     // dump linear memory
     clock_gettime(CLOCK_MONOTONIC, &ts1);
-    rc = wasm_dump_memory(memory);
+    rc = wasm_dump_memory(memory, file_prefix);
     clock_gettime(CLOCK_MONOTONIC, &ts2);
     fprintf(stderr, "memory, %lu\n", get_time(ts1, ts2));
     if (rc < 0) {
@@ -336,7 +353,7 @@ wasm_dump(WASMExecEnv *exec_env, WASMModuleInstance *module,
 
     // dump globals
     clock_gettime(CLOCK_MONOTONIC, &ts1);
-    rc = wasm_dump_global(module, globals, global_data);
+    rc = wasm_dump_global(module, globals, global_data, file_prefix);
     clock_gettime(CLOCK_MONOTONIC, &ts2);
     fprintf(stderr, "global, %lu\n", get_time(ts1, ts2));
     if (rc < 0) {
@@ -346,7 +363,7 @@ wasm_dump(WASMExecEnv *exec_env, WASMModuleInstance *module,
 
     // dump program counter
     clock_gettime(CLOCK_MONOTONIC, &ts1);
-    rc = wasm_dump_program_counter(module, cur_func, frame_ip);
+    rc = wasm_dump_program_counter(module, cur_func, frame_ip, file_prefix);
     clock_gettime(CLOCK_MONOTONIC, &ts2);
     fprintf(stderr, "program counter, %lu\n", get_time(ts1, ts2));
     if (rc < 0) {
@@ -356,7 +373,7 @@ wasm_dump(WASMExecEnv *exec_env, WASMModuleInstance *module,
 
     // dump stack
     clock_gettime(CLOCK_MONOTONIC, &ts1);
-    rc = wasm_dump_stack(exec_env, frame);
+    rc = wasm_dump_stack(exec_env, frame, file_prefix);
     clock_gettime(CLOCK_MONOTONIC, &ts2);
     fprintf(stderr, "stack, %lu\n", get_time(ts1, ts2));
     if (rc < 0) {

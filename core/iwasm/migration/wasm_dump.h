@@ -16,5 +16,15 @@ int wasm_dump(WASMExecEnv *exec_env,
          struct WASMInterpFrame *frame,
          register uint8 *frame_ip);
 
+int wasm_dump_with_prefix(WASMExecEnv *exec_env,
+         WASMModuleInstance *module,
+         WASMMemoryInstance *memory,
+         WASMGlobalInstance *globals,
+         uint8 *global_data,
+         WASMFunctionInstance *cur_func,
+         struct WASMInterpFrame *frame,
+         register uint8 *frame_ip,
+         const char *file_prefix);
+
 int64_t get_time(struct timespec ts1, struct timespec ts2);
 #endif // _WASM_CHECKPOINT_H
