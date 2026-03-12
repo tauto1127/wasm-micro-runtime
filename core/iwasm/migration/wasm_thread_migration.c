@@ -87,6 +87,7 @@
 void *
 signal_control_routine(void *arg)
 {
+    printf("3\n");
     // チェックポイント用スレッドの処理
     WASMCluster *cluster = (WASMCluster *)arg;
     sigset_t set;

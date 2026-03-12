@@ -1232,11 +1232,13 @@ multi_thread_checkpoint_init(WASMCluster *cluster)
         return;
     }
 
+    printf("11\n");
     /* Block signals in this thread; handler thread will consume via sigwait */
     sigemptyset(&set);
     sigaddset(&set, SIGUSR1);
     sigaddset(&set, SIGUSR2);
     pthread_sigmask(SIG_BLOCK, &set, NULL);
+    printf("22\n");
 
     if (os_thread_create(&signal_control_tid, signal_control_routine, cluster,
                          APP_THREAD_STACK_SIZE_DEFAULT)
@@ -1256,6 +1258,7 @@ multi_thread_checkpoint_init(WASMCluster *cluster)
 #else
 #define INIT_CHECKPOINT()                                \
     do {                                                 \
+        printf("initします\n");                          \
         multi_thread_checkpoint_init(exec_env->cluster); \
     } while (0)
 #endif
@@ -1350,6 +1353,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
 #undef HANDLE_OPCODE
 #endif
 
+    // チェックポイントシグナルの受信の初期化
     INIT_CHECKPOINT();
     // Clear soft-dirty bit
     clear_refs();

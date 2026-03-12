@@ -50,10 +50,10 @@ wasm_exec_env_create_internal(struct WASMModuleInstanceCommon *module_inst,
     if (os_cond_init(&exec_env->wait_cond) != 0)
         goto fail3;
 
-#if WASM_ENABLE_DEBUG_INTERP != 0
+// #if WASM_ENABLE_DEBUG_INTERP != 0
     if (!(exec_env->current_status = wasm_cluster_create_exenv_status()))
         goto fail4;
-#endif
+// #endif
 #endif
 
 #ifdef OS_ENABLE_HW_BOUND_CHECK
@@ -90,10 +90,10 @@ fail5:
 #endif
 #endif
 #if WASM_ENABLE_THREAD_MGR != 0
-#if WASM_ENABLE_DEBUG_INTERP != 0
+// #if WASM_ENABLE_DEBUG_INTERP != 0
 fail4:
     os_cond_destroy(&exec_env->wait_cond);
-#endif
+// #endif
 fail3:
     os_mutex_destroy(&exec_env->wait_lock);
 fail2:
