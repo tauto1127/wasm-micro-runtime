@@ -1111,7 +1111,7 @@ wasm_interp_call_func_import(WASMModuleInstance *module_inst,
             printf("%sThread checkpoint started\n", thread_id_ch);           \
         }                                                                    \
         else {                                                               \
-            /* メインスレッド*/                                       \
+            /* メインスレッド*/                                              \
             thread_id_ch = get_file_prefix(-1);                              \
             printf("%sThread checkpoint started\n", thread_id_ch);           \
         }                                                                    \
@@ -1131,26 +1131,35 @@ wasm_interp_call_func_import(WASMModuleInstance *module_inst,
     } while (0)
 #endif
 
-#if WASM_ENABLE_THREAD_MGR == 0
-#define DO_CHECKPOINT()                                                    \
-    do {                                                                   \
-        wasm_cluster_increase_checkpointing_counter(exec_env->cluster);    \
-        wasm_cluster_thread_waiting_run(exec_env);                         \
-        char *thread_id_ch;                                                \
-        INIT_THREAD_ID_CH();                                               \
-                                                                           \
-        SYNC_ALL_TO_FRAME();                                               \
-        uint8 *dummy_ip;                                                   \
-        uint32 *dummy_sp;                                                  \
-        dummy_ip = frame_ip;                                               \
-        dummy_sp = frame_sp;                                               \
-        int rc = wasm_dump(exec_env, module, memory, globals, global_data, \
-                           cur_func, frame, dummy_ip);                     \
-        if (rc < 0) {                                                      \
-            perror("failed to dump\n");                                    \
-            exit(1);                                                       \
-        }                                                                  \
-        END_CHECKPOINT();                                                  \
+#if WASM_ENABLE_THREAD_MGR != 0
+#define DO_CHECKPOINT() /*こっちがマルチスレッド*/                          \
+    do {                                                                    \
+        printf("do_checkpoint_1\n");                                        \
+        int status =                                                        \
+            wasm_cluster_increase_checkpointing_counter(exec_env->cluster); \
+        if (status == -1) {                                                 \
+            perror("failed to increase checkpointing counter\n");           \
+            exit(1);                                                        \
+        }                                                                   \
+        printf("do_checkpoint_2\n");                                        \
+        wasm_cluster_thread_waiting_run(exec_env);                          \
+        printf("do_checkpoint_3\n");                                        \
+        char *thread_id_ch;                                                 \
+        INIT_THREAD_ID_CH();                                                \
+                                                                            \
+        SYNC_ALL_TO_FRAME();                                                \
+        uint8 *dummy_ip;                                                    \
+        uint32 *dummy_sp;                                                   \
+        dummy_ip = frame_ip;                                                \
+        dummy_sp = frame_sp;                                                \
+        int rc = wasm_dump(exec_env, module, memory, globals, global_data,  \
+                           cur_func, frame, dummy_ip);                      \
+        printf("do_checkpoint_4\n");                                        \
+        if (rc < 0) {                                                       \
+            perror("failed to dump\n");                                     \
+            exit(1);                                                        \
+        }                                                                   \
+        END_CHECKPOINT();                                                   \
     } while (0)
 #else
 #define DO_CHECKPOINT()                                                    \
@@ -1171,7 +1180,7 @@ wasm_interp_call_func_import(WASMModuleInstance *module_inst,
     } while (0)
 #endif
 
-#if WASM_ENABLE_THREAD_MGR == 0
+#if WASM_ENABLE_THREAD_MGR != 0
 #define CHECK_DUMP()                                                        \
     if (IS_WAMR_CHECKPOINT_SIG(wasm_cluster_get_thread_signal(exec_env))) { \
         printf("checkpoint\n");                                             \
@@ -1276,13 +1285,13 @@ multi_thread_checkpoint_init(WASMCluster *cluster)
 #endif
 
 // チェックポイントシグナルを受け取るための初期化処理
-#if WASM_ENABLE_THREAD_MGR != 0
+#if WASM_ENABLE_THREAD_MGR == 0
 #define INIT_CHECKPOINT()                   \
     do {                                    \
         signal(SIGINT, wasm_interp_sigint); \
     } while (0)
 #else
-#define INIT_CHECKPOINT()                                \
+#define INIT_CHECKPOINT() /*こっちがマルチ*/             \
     do {                                                 \
         printf("initします\n");                          \
         multi_thread_checkpoint_init(exec_env->cluster); \

@@ -222,18 +222,24 @@ wasm_cluster_destroy_exenv_status(WASMCurrentEnvStatus *status);
 void
 wasm_cluster_send_signal_all(WASMCluster *cluster, uint32 signo);
 
+void
+wasm_cluster_thread_continue_all(WASMCluster *cluster);
+
 /* This function must be called with exec_env->wait_lock locked, otherwise we
  * may miss the signal from debugger thread, see
  * https://github.com/bytecodealliance/wasm-micro-runtime/issues/1860 */
 void
 wasm_cluster_thread_waiting_run(WASMExecEnv *exec_env);
 
-struct AtomicCounter*
+struct AtomicCounter *
 wasm_cluster_init_checkpointing_counter(WASMCluster *cluster, int count);
 
-int wasm_cluster_decrease_checkpointing_counter(WASMCluster *cluster);
-int wasm_cluster_increase_checkpointing_counter(WASMCluster *cluster);
-int wasm_cluster_reset_checkpointing_counter(WASMCluster *cluster);
+int
+wasm_cluster_decrease_checkpointing_counter(WASMCluster *cluster);
+int
+wasm_cluster_increase_checkpointing_counter(WASMCluster *cluster);
+int
+wasm_cluster_reset_checkpointing_counter(WASMCluster *cluster);
 
 int
 wasm_cluster_get_waiting_thread_count(WASMCluster *cluster);
@@ -247,7 +253,8 @@ wasm_cluster_wake_up_threads(WASMCluster *cluster);
 int
 wasm_cluster_get_thread_count(WASMCluster *cluster);
 
-int* wasm_cluster_get_thread_ids(WASMCluster *cluster);
+int *
+wasm_cluster_get_thread_ids(WASMCluster *cluster);
 
 void
 wasm_cluster_wait_thread_status(WASMExecEnv *exec_env, uint32 *status);

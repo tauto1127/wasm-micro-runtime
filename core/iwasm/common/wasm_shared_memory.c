@@ -443,17 +443,32 @@ wasm_runtime_atomic_notify(WASMModuleInstanceCommon *module, void *address,
 
 #if WASM_ENABLE_THREAD_MGR != 0
 
-// static uint32
-// get_wait_node_count(void)
-// {
-//     uint32 total = 0;
-//
-//     if (wait_map) {
-//         bh_hash_map_traverse(wait_map, _wait_node_count_cb, &total);
-//     }
-//
-//     return total;
-// }
+static void
+wait_count_cb(void *key, void *value, void *user_data)
+{
+    AtomicWaitInfo *info = (AtomicWaitInfo *)value;
+    uint32 *total = (uint32 *)user_data;
+
+    (void)key;
+
+    if (!info || !info->wait_list || !total) {
+        return;
+    }
+
+    *total += (uint32)info->wait_list->len;
+}
+
+static uint32
+wait_node_count_locked(void)
+{
+    uint32 total = 0;
+
+    if (wait_map) {
+        bh_hash_map_traverse(wait_map, wait_count_cb, &total);
+    }
+
+    return total;
+}
 
 HashMap *
 get_wait_map(void)
@@ -467,10 +482,16 @@ wasm_shared_memory_get_waiters_count(void)
     uint32 total;
 
     os_mutex_lock(&g_shared_memory_lock);
-    total = wasm_shared_memory_get_waiters_count();
+    total = wait_node_count_locked();
     os_mutex_unlock(&g_shared_memory_lock);
 
-    return (int)total;
+    return total;
+}
+
+int
+get_wait_node_count(void)
+{
+    return (int)wasm_shared_memory_get_waiters_count();
 }
 
 typedef struct WaitTidCollectCtx {
@@ -509,7 +530,7 @@ get_wait_node_tids(void)
     WaitTidCollectCtx ctx;
 
     os_mutex_lock(&g_shared_memory_lock);
-    count = wasm_shared_memory_get_waiters_count();
+    count = wait_node_count_locked();
 
     tids = wasm_runtime_malloc(sizeof(int) * (count + 1));
     if (!tids) {

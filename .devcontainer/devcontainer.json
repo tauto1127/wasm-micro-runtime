@@ -4,7 +4,7 @@
 // https://github.com/microsoft/vscode-dev-containers/tree/v0.245.2/containers/cpp
 {
   "name": "WAMR-Dev",
-  "image": "takuto1127/ubuntu24-wamr-dev:v1.0",
+  "image": "takuto1127/ubuntu24-wamr-dev:v1.1",
   "privileged": true,
   "mounts": [
     "source=${localEnv:HOME}/Code/ubuntu,target=/root/Code,type=bind",
