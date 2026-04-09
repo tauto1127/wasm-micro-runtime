@@ -307,9 +307,8 @@ wasm_dump_global(WASMModuleInstance *module, WASMGlobalInstance *globals,
         }
     }
 
-    return wasmig_checkpoint_global_with_prefix(values, types,
-                                                module->e->global_count,
-                                                file_prefix);
+    return wasmig_checkpoint_global_with_prefix(
+        values, types, module->e->global_count, file_prefix);
 }
 
 int
@@ -327,8 +326,8 @@ wasm_dump(WASMExecEnv *exec_env, WASMModuleInstance *module,
           uint8 *global_data, WASMFunctionInstance *cur_func,
           struct WASMInterpFrame *frame, register uint8 *frame_ip)
 {
-    return wasm_dump_with_prefix(exec_env, module, memory, globals,
-                                 global_data, cur_func, frame, frame_ip, NULL);
+    return wasm_dump_with_prefix(exec_env, module, memory, globals, global_data,
+                                 cur_func, frame, frame_ip, NULL);
 }
 
 int
@@ -378,6 +377,16 @@ wasm_dump_with_prefix(WASMExecEnv *exec_env, WASMModuleInstance *module,
     fprintf(stderr, "stack, %lu\n", get_time(ts1, ts2));
     if (rc < 0) {
         LOG_ERROR("Failed to dump frame\n");
+        return rc;
+    }
+
+    // dump threaed attrs if needed
+    clock_gettime(CLOCK_MONOTONIC, &ts1);
+    rc = wasm_dump_thread_states(exec_env, file_prefix);
+    clock_gettime(CLOCK_MONOTONIC, &ts2);
+    fprintf(stderr, "%sthread attrs, %lu\n", file_prefix, get_time(ts1, ts2));
+    if (rc < 0) {
+        LOG_ERROR("Failed to dump thread attrs\n");
         return rc;
     }
 

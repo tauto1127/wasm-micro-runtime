@@ -1132,7 +1132,7 @@ wasm_interp_call_func_import(WASMModuleInstance *module_inst,
 #endif
 
 #if WASM_ENABLE_THREAD_MGR != 0
-#define DO_CHECKPOINT() /*こっちがマルチスレッド*/                          \
+#define DO_CHECKPOINT() /*こっちがマルチスレッド，各スレッドの処理*/                          \
     do {                                                                    \
         printf("do_checkpoint_1\n");                                        \
         int status =                                                        \
@@ -1142,6 +1142,7 @@ wasm_interp_call_func_import(WASMModuleInstance *module_inst,
             exit(1);                                                        \
         }                                                                   \
         printf("do_checkpoint_2\n");                                        \
+    /*ここで止まってる？*/\
         wasm_cluster_thread_waiting_run(exec_env);                          \
         printf("do_checkpoint_3\n");                                        \
         char *thread_id_ch;                                                 \
