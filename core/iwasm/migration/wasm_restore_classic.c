@@ -7,6 +7,7 @@
 #include "wasm_migration.h"
 #include "wasm_restore.h"
 #include "wasm_migration_helper.h"
+#include "wasm_thread_migration.h"
 #include <wasmig/migration.h>
 #include <wasmig/log.h>
 #include <wasmig/table_v3.h>
@@ -216,6 +217,55 @@ _create_frame(WASMExecEnv *exec_env, WASMModuleInstance *module_inst,
     return frame;
 }
 
+// Reconstruct a frame's control stack (csp) from the function's static block
+// table (option B). Selects the blocks open at pc and orders them
+// outer->inner. No shared state, so any thread can call it for its own pc.
+static void
+reconstruct_csp(WASMFunctionInstance *func_inst, CodePos pc,
+                CSPEntry **out_csp, uint32 *out_size)
+{
+    WASMFunction *wf = func_inst->u.func;
+    uint8 *code = wasm_get_func_code(func_inst);
+    WASMRestoreBlock *bt = wf->block_table;
+    uint32 n = wf->block_table_count;
+    CSPEntry *arr = NULL;
+    uint32 m = 0;
+
+    if (n > 0) {
+        arr = wasm_runtime_malloc((uint32)(sizeof(CSPEntry) * n));
+        if (arr == NULL) {
+            *out_csp = NULL;
+            *out_size = 0;
+            return;
+        }
+        for (uint32 j = 0; j < n; j++) {
+            uint64 begin_off = (uint64)(bt[j].begin_addr - code);
+            uint64 end_off = (uint64)(bt[j].end_addr - code);
+            if (begin_off <= pc.offset && pc.offset < end_off) {
+                arr[m].label_type = bt[j].label_type;
+                arr[m].begin_addr = bt[j].begin_addr;
+                arr[m].target_addr = bt[j].target_addr;
+                arr[m].sp_offset = bt[j].sp_offset;
+                arr[m].cell_num = bt[j].cell_num;
+                m++;
+            }
+        }
+        // insertion sort by begin_addr ascending (outer -> inner nesting)
+        for (uint32 a = 1; a < m; a++) {
+            CSPEntry key = arr[a];
+            int b = (int)a - 1;
+            while (b >= 0 && arr[b].begin_addr > key.begin_addr) {
+                arr[b + 1] = arr[b];
+                b--;
+            }
+            arr[b + 1] = key;
+        }
+    }
+
+    *out_csp = arr;
+    *out_size = m;
+}
+
 static void
 _restore_all_frames(WASMExecEnv *exec_env, WASMModuleInstance *module_inst, WASMCSPFrameStack *cs)
 {
@@ -240,30 +290,47 @@ _restore_all_frames(WASMExecEnv *exec_env, WASMModuleInstance *module_inst, WASM
     wasmig_debug("restore frame\n");
 }
 
-void
-wasm_restore_stack(WASMExecEnv **_exec_env)
+WASMInterpFrame *
+wasm_restore_stack(WASMExecEnv **_exec_env, char *file_prefix)
 {
     wasmig_info("wasm_restore_stack\n");
-    
+
     WASMExecEnv *exec_env = *_exec_env;
     WASMModuleInstance *module_inst = (WASMModuleInstance *)exec_env->module_inst;
-    
-    // コールスタックの復元
-    // CallStack cs = wasmig_restore_stack();
-    WASMCSPFrameStack* cs = load_wasm_call_stack();
-    if (cs == NULL) {
-        wasmig_error("Failed to load call stack");
+
+    // コールスタックの復元（option B: スレッド別・実行時に再構築）
+    // 各スレッドが自分の保存スタック (prefix付き) を読み、各フレームの csp は
+    // 関数の静的ブロックテーブルから pc に応じて組み立てる。ロード時のグローバル
+    // (WASMCallStack) には依存しない。
+    CallStack raw = wasmig_restore_stack_with_prefix(file_prefix);
+
+    WASMCSPFrameStack stack;
+    stack.size = raw.size;
+    stack.frames =
+        wasm_runtime_malloc((uint32)(sizeof(WASMCSPFrame) * raw.size));
+    if (stack.frames == NULL) {
+        wasmig_error("Failed to alloc restore frames");
         return NULL;
     }
-    wasmig_debug("restore_stack: cs.size: %d\n", cs->size);
-    // print_call_stack(&cs);
-    
+
+    for (uint32 i = 0; i < raw.size; i++) {
+        WASMCSPFrame *f = &stack.frames[i];
+        f->entry = raw.entries[i];
+        WASMFunctionInstance *func_inst =
+            &module_inst->e->functions[f->entry.pc.fidx];
+        reconstruct_csp(func_inst, f->entry.pc, &f->csp, &f->csp_size);
+    }
+
+    wasmig_debug("restore_stack: cs.size: %d\n", stack.size);
+
     // 全フレームの復元
-    _restore_all_frames(exec_env, module_inst, cs);
-    
-    _exec_env = &exec_env;
-    
+    _restore_all_frames(exec_env, module_inst, &stack);
+
+    *_exec_env = exec_env;
+
     wasmig_info("Finish to restore stack\n");
+
+    return wasm_exec_env_get_cur_frame(exec_env);
 }
 
 void restore_dirty_memory(WASMMemoryInstance **memory, FILE* memory_fp) {
@@ -283,8 +350,8 @@ void restore_dirty_memory(WASMMemoryInstance **memory, FILE* memory_fp) {
     }
 }
 
-int wasm_restore_memory(WASMModuleInstance *module, WASMMemoryInstance **memory, uint8** maddr) {
-    Array8 mem = wasmig_restore_memory();
+int wasm_restore_memory(WASMModuleInstance *module, WASMMemoryInstance **memory, uint8** maddr, char *file_prefix) {
+    Array8 mem = wasmig_restore_memory_with_prefix(file_prefix);
 
     // restore page_count
     uint32 page_count = mem.size / (*memory)->num_bytes_per_page;
@@ -299,8 +366,10 @@ int wasm_restore_memory(WASMModuleInstance *module, WASMMemoryInstance **memory,
 }
 
 // TODO: wasmigを使う
-int wasm_restore_global(const WASMModuleInstance *module, const WASMGlobalInstance *globals, uint8 **global_data, uint8 **global_addr) {
-    FILE* fp = wamr_open_image("global.img", "rb");
+int wasm_restore_global(const WASMModuleInstance *module, const WASMGlobalInstance *globals, uint8 **global_data, uint8 **global_addr, char *file_prefix) {
+    char file_name[MAX_FILE_NAME_LENGTH] = "global.img";
+    str_add_prefix(file_name, file_prefix);
+    FILE* fp = wamr_open_image(file_name, "rb");
 
     for (int i = 0; i < module->e->global_count; i++) {
         switch (globals[i].type) {
@@ -334,9 +403,10 @@ void debug_addr(const char* name, const char* func_name, int value) {
 
 int wasm_restore_program_counter(
     WASMModuleInstance *module,
-    uint8 **frame_ip)
+    uint8 **frame_ip,
+    char *file_prefix)
 {
-    CodePos pc = wasmig_restore_pc();
+    CodePos pc = wasmig_restore_pc_with_prefix(file_prefix);
     *frame_ip = get_call_address(pc.fidx, pc.offset);
 
     return 0;
@@ -359,26 +429,27 @@ int wasm_restore(WASMModuleInstance **module,
             uint8 **else_addr,
             uint8 **end_addr,
             uint8 **maddr,
-            bool *done_flag)
+            bool *done_flag,
+            char *file_prefix)
 {
     struct timespec ts1, ts2;
     // restore memory
     clock_gettime(CLOCK_MONOTONIC, &ts1);
-    wasm_restore_memory(*module, memory, maddr);
+    wasm_restore_memory(*module, memory, maddr, file_prefix);
     clock_gettime(CLOCK_MONOTONIC, &ts2);
     fprintf(stderr, "memory, %lu\n", get_time(ts1, ts2));
     // printf("Success to restore linear memory\n");
 
     // restore globals
     clock_gettime(CLOCK_MONOTONIC, &ts1);
-    wasm_restore_global(*module, *globals, global_data, global_addr);
+    wasm_restore_global(*module, *globals, global_data, global_addr, file_prefix);
     clock_gettime(CLOCK_MONOTONIC, &ts2);
     fprintf(stderr, "global, %lu\n", get_time(ts1, ts2));
     // printf("Success to restore globals\n");
 
     // restore program counter
     clock_gettime(CLOCK_MONOTONIC, &ts1);
-    wasm_restore_program_counter(*module, frame_ip);
+    wasm_restore_program_counter(*module, frame_ip, file_prefix);
     clock_gettime(CLOCK_MONOTONIC, &ts2);
     fprintf(stderr, "program counter, %lu\n", get_time(ts1, ts2));
     // printf("Success to program counter\n");

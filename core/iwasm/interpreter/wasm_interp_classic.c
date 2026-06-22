@@ -1153,8 +1153,9 @@ wasm_interp_call_func_import(WASMModuleInstance *module_inst,
         uint32 *dummy_sp;                                                   \
         dummy_ip = frame_ip;                                                \
         dummy_sp = frame_sp;                                                \
-        int rc = wasm_dump(exec_env, module, memory, globals, global_data,  \
-                           cur_func, frame, dummy_ip);                      \
+        int rc = wasm_dump_with_prefix(exec_env, module, memory, globals,   \
+                                       global_data, cur_func, frame,        \
+                                       dummy_ip, thread_id_ch);             \
         printf("do_checkpoint_4\n");                                        \
         if (rc < 0) {                                                       \
             perror("failed to dump\n");                                     \
@@ -1315,6 +1316,10 @@ clear_refs()
 static bool sig_flag = false;
 static void (*native_handler)(void) = NULL;
 bool done_flag = false;
+/* Total number of threads expected to participate in the restore barrier.
+   Set by the main thread (from the dumped thread_count) before it spawns the
+   child threads, so every thread can wait for all restores to complete. */
+static volatile int g_restore_total_threads = 1;
 void
 wasm_interp_sigint(int signum)
 {
@@ -1404,10 +1409,57 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
         // bool done_flag;
         int rc;
         struct timespec ts1, ts2;
+        ThreadStartArg *restore_thread_arg =
+            (ThreadStartArg *)exec_env->thread_arg;
+        char *file_prefix;
+
+        if (restore_thread_arg == NULL
+            && wasm_cluster_get_thread_signal(exec_env) != WAMR_SIG_RESTORE) {
+            // ===== main thread: orchestrate restoring all threads =====
+            wasm_cluster_thread_send_signal(exec_env, WAMR_SIG_RESTORE);
+
+            g_restore_total_threads = 1;
+            wasm_cluster_init_checkpointing_counter(exec_env->cluster, 0);
+
+            char ts_name[MAX_FILE_NAME_LENGTH] = "thread_state.img";
+            str_add_prefix(ts_name, MAIN_THREAD_PREFIX);
+            FILE *ts_fp = fopen(ts_name, "rb");
+            if (ts_fp != NULL) {
+                int16 thread_count = 0;
+                fread(&thread_count, sizeof(int16), 1, ts_fp);
+                int to_read = thread_count > 1 ? thread_count - 1 : 0;
+                int *thread_ids =
+                    wasm_runtime_malloc((uint32)(sizeof(int) * (to_read + 1)));
+                fread(thread_ids, sizeof(int), to_read, ts_fp);
+                thread_ids[to_read] = -1;
+                fclose(ts_fp);
+
+                restore_thread_id(thread_ids, (uint32)to_read);
+
+                // Set the barrier target BEFORE spawning children so every
+                // restored thread waits for the full set.
+                g_restore_total_threads = thread_count > 0 ? thread_count : 1;
+
+                for (int *p = thread_ids; *p != -1; p++) {
+                    char *child_prefix = get_file_prefix(*p);
+                    printf("Restoring wasm thread %d\n", *p);
+                    wasm_restore_thread(exec_env, child_prefix);
+                }
+                wasm_runtime_free(thread_ids);
+            }
+
+            file_prefix = get_file_prefix(-1);
+        }
+        else {
+            // ===== child thread (or main re-entry): restore own state =====
+            int32 tid =
+                restore_thread_arg ? restore_thread_arg->thread_id : -1;
+            file_prefix = get_file_prefix(tid);
+        }
 
         // NOTE: Can the wasm_restore_stack() include in wasm_restore()?
         clock_gettime(CLOCK_MONOTONIC, &ts1);
-        wasm_restore_stack(&exec_env);
+        wasm_restore_stack(&exec_env, file_prefix);
         frame = wasm_exec_env_get_cur_frame(exec_env);
         clock_gettime(CLOCK_MONOTONIC, &ts2);
         fprintf(stderr, "stack, %lu\n", get_time(ts1, ts2));
@@ -1433,7 +1485,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                           &globals, &global_data, &global_addr, &frame,
                           &dummy_ip, &dummy_lp, &dummy_sp, &frame_csp,
                           &frame_ip_end, &else_addr, &end_addr, &maddr,
-                          &done_flag);
+                          &done_flag, file_prefix);
         if (rc < 0) {
             // error
             perror("failed to restore\n");
@@ -1447,6 +1499,24 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
 
         frame_lp = frame->lp;
         UPDATE_ALL_FROM_FRAME();
+
+        // ===== post-restore barrier =====
+        // Wait until every thread has finished restoring before anyone resumes
+        // execution. Without this, threads race on the shared linear memory
+        // while restoring it concurrently, corrupting each other's state.
+        wasm_cluster_increase_checkpointing_counter(exec_env->cluster);
+        {
+            struct AtomicCounter *rc_counter =
+                exec_env->cluster->checkpoint_counter;
+            if (rc_counter != NULL) {
+                os_mutex_lock(&rc_counter->lock);
+                while (rc_counter->checkpoint_count < g_restore_total_threads) {
+                    os_cond_wait(&rc_counter->cond, &rc_counter->lock);
+                }
+                os_mutex_unlock(&rc_counter->lock);
+            }
+        }
+        set_restore_flag(false);
 
         // checkpoint after restoring the Wasm state for debugging
         char *is_checkpoint_after_restore = getenv("CHECKPOINT_AFTER_RESTORE");
@@ -1477,7 +1547,6 @@ migration_async:
             perror("failed to dump\n");
             exit(1);
         }
-        LOG_DEBUG("dispatch_count: %d\n", dispatch_count);
         exit(0);
     }
     FETCH_OPCODE_AND_DISPATCH();

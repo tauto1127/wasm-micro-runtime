@@ -9,4 +9,14 @@ typedef struct {
     int32 thread_id;
 } ThreadStartArg;
 
+#define THREAD_START_FUNCTION "wasi_thread_start"
+
+void
+deallocate_thread_id(int32 thread_id);
+
+void
+restore_thread_id(int32 *thread_id, uint32 size);
+
+void *
+thread_start(void *arg);
 

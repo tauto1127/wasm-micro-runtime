@@ -3,6 +3,9 @@
 #include "wasm_migration.h"
 #include "thread_manager.h"
 #include "lib_wasi_threads_wrapper.h"
+#include "wasm_runtime_common.h"
+#include "wasm_native.h"
+#include "bh_log.h"
 
 int *wait_thread_ids = NULL;
 int wait_thread_ids_count = 0;
@@ -33,19 +36,21 @@ checkpoint_routine(WASMCluster *cluster)
     //     os_mutex_unlock(&counter->lock);
     // }
     // # Phase 2
-    os_mutex_lock(&counter->lock);
+    // NOTE: get_thread_count()/get_waiting_thread_count() take cluster->lock,
+    // and increase_checkpointing_counter() takes cluster->lock then
+    // counter->lock. To avoid an ABBA deadlock we must NOT hold counter->lock
+    // while querying the cluster counts, so read them before locking counter.
     for (;;) {
         waits = wasm_cluster_get_waiting_thread_count(cluster);
         counts = wasm_cluster_get_thread_count(cluster);
 
-        printf("waits:%d, counts:%d, counter:%d\n", waits, counts,
-               counter->checkpoint_count);
+        os_mutex_lock(&counter->lock);
         if (counter->checkpoint_count + waits == counts) {
             os_mutex_unlock(&counter->lock);
             break;
         }
-
         os_cond_wait(&counter->cond, &counter->lock);
+        os_mutex_unlock(&counter->lock);
     };
     // printf("======waitしているスレッド一覧をダンプします========\n");
     wait_thread_ids = wasm_cluster_get_waiting_thread_ids(cluster);
@@ -54,14 +59,15 @@ checkpoint_routine(WASMCluster *cluster)
     // Phase 3
     // =====スレッド同時停止======
     wasm_cluster_wake_up_threads(cluster);
-    os_mutex_lock(&counter->lock);
     for (;;) {
         counts = wasm_cluster_get_thread_count(cluster);
+        os_mutex_lock(&counter->lock);
         if (counter->checkpoint_count == counts) {
             os_mutex_unlock(&counter->lock);
             break;
         }
         os_cond_wait(&counter->cond, &counter->lock);
+        os_mutex_unlock(&counter->lock);
     };
 
     // ========チェックポイント開始========
@@ -69,14 +75,15 @@ checkpoint_routine(WASMCluster *cluster)
     wasm_cluster_thread_continue_all(cluster);
 
     // やっぱちゃんとカウントしないと，全部終わったか分からんな
-    os_mutex_lock(&counter->lock);
     for (;;) {
         counts = wasm_cluster_get_thread_count(cluster);
+        os_mutex_lock(&counter->lock);
         if (counter->checkpoint_count == counts) {
             os_mutex_unlock(&counter->lock);
             break;
         }
         os_cond_wait(&counter->cond, &counter->lock);
+        os_mutex_unlock(&counter->lock);
     };
     // clock_gettime(CLOCK_MONOTONIC, &endAtNop);
     // printf("checkpoint time(nopから): %lu ns\n",
@@ -220,4 +227,98 @@ str_add_prefix(char *file_name, char *file_prefix)
     strcpy(buf, file_prefix);
     strcat(buf, file_name);
     strcpy(file_name, buf);
+}
+
+// thread_id とスレッド開始関数の引数を <prefix>thread_state.img から復元し、
+// 開始関数を解決して thread_start_arg を組み立てる
+int
+wasm_restore_thread_start_arg(ThreadStartArg *thread_start_arg,
+                              wasm_module_inst_t new_module_inst,
+                              char *file_prefix)
+{
+    char file_name[MAX_FILE_NAME_LENGTH] = "thread_state.img";
+    str_add_prefix(file_name, file_prefix);
+    FILE *fp = wamr_open_image(file_name, "rb");
+    if (fp == NULL) {
+        fprintf(stderr, "failed to open %s\n", file_name);
+        goto thread_preparation_fail;
+    }
+    fread(&thread_start_arg->thread_id, sizeof(int32), 1, fp);
+    printf("thread %d restore\n", thread_start_arg->thread_id);
+    fread(&thread_start_arg->arg, sizeof(uint32), 1, fp);
+
+    wasm_function_inst_t start_func =
+        wasm_runtime_lookup_function(new_module_inst, THREAD_START_FUNCTION,
+                                     NULL);
+    if (!start_func) {
+        LOG_ERROR("Failed to find thread start function %s",
+                  THREAD_START_FUNCTION);
+        fclose(fp);
+        goto thread_preparation_fail;
+    }
+
+    thread_start_arg->start_func = start_func;
+    fclose(fp);
+
+    return 0;
+
+thread_preparation_fail:
+    if (new_module_inst)
+        wasm_runtime_deinstantiate_internal(new_module_inst, true);
+    if (thread_start_arg)
+        wasm_runtime_free(thread_start_arg);
+
+    return -1;
+}
+
+// restore wasm thread and start execution
+// 親のフラグを継承する
+int
+wasm_restore_thread(wasm_exec_env_t parent_exec_env, char *file_prefix)
+{
+    // モジュールインスタンスを作成する．
+    wasm_module_t module = wasm_exec_env_get_module(parent_exec_env);
+    wasm_module_inst_t module_inst = get_module_inst(parent_exec_env);
+    wasm_module_inst_t new_module_inst = NULL;
+    ThreadStartArg *thread_start_arg = NULL;
+    uint32 stack_size = 8192;
+
+    bh_assert(module);
+    bh_assert(module_inst);
+
+    // モジュールインスタンスの生成
+    stack_size = ((WASMModuleInstance *)module_inst)->default_wasm_stack_size;
+
+    if (!(new_module_inst = wasm_runtime_instantiate_internal(
+              module, module_inst, parent_exec_env, stack_size, 0, NULL, 0,
+              true))) {
+        printf("Failed to create new module inst\n");
+        return -1;
+    }
+
+    // 親からカスタムデータなどを引き継ぐ
+    wasm_runtime_set_custom_data_internal(
+        new_module_inst, wasm_runtime_get_custom_data(module_inst));
+
+    wasm_native_inherit_contexts(new_module_inst, module_inst);
+
+    // スレッド開始に必要な引数を復元
+    if (!(thread_start_arg = wasm_runtime_malloc(sizeof(ThreadStartArg)))) {
+        LOG_ERROR("Runtime args allocation failed");
+        wasm_runtime_deinstantiate_internal(new_module_inst, true);
+        return -1;
+    }
+
+    if (wasm_restore_thread_start_arg(thread_start_arg, new_module_inst,
+                                      file_prefix)
+        != 0) {
+        return -1;
+    }
+
+    // is_aux_stack_allocated は threads_spawn_wrapper に合わせて false にする
+    // ここで exec_env を作っている
+    wasm_cluster_create_thread(parent_exec_env, new_module_inst, false, 0, 0,
+                               thread_start, thread_start_arg);
+
+    return 0;
 }

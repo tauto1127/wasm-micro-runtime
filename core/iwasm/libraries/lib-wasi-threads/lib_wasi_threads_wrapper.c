@@ -16,7 +16,6 @@
 #include "aot_runtime.h"
 #endif
 
-static const char *THREAD_START_FUNCTION = "wasi_thread_start";
 static korp_mutex thread_id_lock;
 static TidAllocator tid_allocator;
 
@@ -38,7 +37,15 @@ deallocate_thread_id(int32 thread_id)
     os_mutex_unlock(&thread_id_lock);
 }
 
-static void *
+void
+restore_thread_id(int32 *thread_id, uint32 size)
+{
+    os_mutex_lock(&thread_id_lock);
+    tid_allocator_restore(&tid_allocator, thread_id, size);
+    os_mutex_unlock(&thread_id_lock);
+}
+
+void *
 thread_start(void *arg)
 {
     wasm_exec_env_t exec_env = (wasm_exec_env_t)arg;

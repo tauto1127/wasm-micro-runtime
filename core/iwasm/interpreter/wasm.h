@@ -21,6 +21,20 @@ typedef struct CSPEntry CSPEntry;
 typedef struct WASMCSPFrame WASMCSPFrame;
 typedef struct WASMCSPFrameStack WASMCSPFrameStack;
 
+/* Static per-function control-block geometry, built once at load time and
+   pc-independent. Used to reconstruct a frame's control stack (csp) at
+   restore time without relying on the single-slot is_restore_frame path,
+   so any number of threads (and the fast interpreter) can reconstruct
+   their own csp. Addresses are valid within the current process. */
+typedef struct WASMRestoreBlock {
+    uint8 label_type;
+    uint8 *begin_addr;
+    uint8 *end_addr;
+    uint8 *target_addr;
+    uint32 sp_offset;
+    uint32 cell_num;
+} WASMRestoreBlock;
+
 /** Value Type */
 #define VALUE_TYPE_I32 0x7F
 #define VALUE_TYPE_I64 0X7E
@@ -276,6 +290,11 @@ struct WASMFunction {
     bool is_restore_frame;
     CodePos return_pos;
     WASMCSPFrame *frame;
+
+    /* Static control-block table for per-thread csp reconstruction (option B).
+       Built once during wasm_loader_prepare_bytecode, pc-independent. */
+    WASMRestoreBlock *block_table;
+    uint32 block_table_count;
 
 #if WASM_ENABLE_FAST_JIT != 0 || WASM_ENABLE_JIT != 0 \
     || WASM_ENABLE_WAMR_COMPILER != 0

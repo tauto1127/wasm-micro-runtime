@@ -3589,7 +3589,10 @@ load_from_sections(WASMModule *module, WASMSection *sections,
     WASMCSPFrameStack* csp_call_stack = load_wasm_call_stack();
     wasmig_debug("Restoring control stack");
     // WASMCSPFrameStack csp_call_stack;
-    if (get_restore_flag()) {
+    // option B: the call stack / csp is reconstructed per-thread at exec-time
+    // from each function's static block_table (see reconstruct_csp), so the
+    // single-slot load-time path below is disabled.
+    if (0 && get_restore_flag()) {
         csp_call_stack = realloc(csp_call_stack, sizeof(WASMCSPFrameStack));
         CallStack call_stack = wasmig_restore_stack();
         csp_call_stack->size = call_stack.size;
@@ -3626,8 +3629,8 @@ load_from_sections(WASMModule *module, WASMSection *sections,
         }
     }
 
-    // Store control stack to global
-    if (get_restore_flag()) {
+    // Store control stack to global (disabled: option B reconstructs per-thread)
+    if (0 && get_restore_flag()) {
         store_wasm_call_stack(csp_call_stack);
     }
 
@@ -6604,8 +6607,9 @@ fail:
             }                                                                   \
             cur_stack_height++;                                                     \
         }                                                                        \
+        PUSH_BLOCK_TABLE(_label_type, _start_addr, _cell_num);                   \
     } while (0);
-    
+
 #define POP_CSP_FOR_RESTORE(end_addr)                                           \
     do {                                                                        \
         if (func->is_restore_frame) {                                           \
@@ -6624,7 +6628,63 @@ fail:
             }                                                                       \
             cur_stack_height--;                                                     \
         }                                                                        \
+        POP_BLOCK_TABLE(end_addr);                                               \
     } while (0);
+
+/* Append a completed control block to a function's static block table
+   (option B: per-thread csp reconstruction). Grows by doubling. */
+static bool
+bt_record(WASMRestoreBlock **table, uint32 *count, uint32 *cap,
+          WASMRestoreBlock *blk)
+{
+    if (*count >= *cap) {
+        uint32 ncap = *cap ? *cap * 2 : 16;
+        WASMRestoreBlock *nt;
+        if (*table)
+            nt = wasm_runtime_realloc(*table,
+                                      ncap * (uint32)sizeof(WASMRestoreBlock));
+        else
+            nt = wasm_runtime_malloc(ncap * (uint32)sizeof(WASMRestoreBlock));
+        if (!nt)
+            return false;
+        *table = nt;
+        *cap = ncap;
+    }
+    (*table)[(*count)++] = *blk;
+    return true;
+}
+
+/* Maximum control-block nesting tracked for the static block table. */
+#define BT_MAX_DEPTH 1024
+
+#define PUSH_BLOCK_TABLE(_label_type, _start_addr, _cell_num)               \
+    do {                                                                   \
+        if (bt_depth < BT_MAX_DEPTH) {                                     \
+            bt_open[bt_depth].label_type = (_label_type);                 \
+            bt_open[bt_depth].begin_addr = (_start_addr);                 \
+            bt_open[bt_depth].end_addr = NULL;                            \
+            bt_open[bt_depth].target_addr = NULL;                         \
+            bt_open[bt_depth].sp_offset = loader_ctx->stack_cell_num;     \
+            bt_open[bt_depth].cell_num = (_cell_num);                     \
+        }                                                                  \
+        bt_depth++;                                                        \
+    } while (0)
+
+#define POP_BLOCK_TABLE(_end_addr)                                         \
+    do {                                                                   \
+        if (bt_depth > 0) {                                               \
+            bt_depth--;                                                    \
+            if (bt_depth < BT_MAX_DEPTH) {                                \
+                WASMRestoreBlock _b = bt_open[bt_depth];                  \
+                _b.end_addr = (_end_addr);                                \
+                _b.target_addr = (_b.label_type == LABEL_TYPE_LOOP)       \
+                                     ? _b.begin_addr                      \
+                                     : (_end_addr);                       \
+                if (!bt_record(&bt_table, &bt_count, &bt_cap, &_b))       \
+                    goto fail;                                            \
+            }                                                             \
+        }                                                                  \
+    } while (0)
 
 #define PUSH_CSP(label_type, block_type, _start_addr)                       \
     do {                                                                    \
@@ -7334,6 +7394,11 @@ re_scan:
 
     CSPEntry csp[1024];
     uint32 cur_stack_height = 0, seen_stack_height = 0, csp_height = 0;
+    /* Static control-block table builder (option B). */
+    WASMRestoreBlock bt_open[BT_MAX_DEPTH];
+    uint32 bt_depth = 0;
+    WASMRestoreBlock *bt_table = NULL;
+    uint32 bt_count = 0, bt_cap = 0;
     PUSH_CSP(LABEL_TYPE_FUNCTION, func_block_type, p);
     PUSH_CSP_FOR_RESTORE(LABEL_TYPE_FUNCTION, p, func->ret_cell_num);
 
@@ -10404,9 +10469,20 @@ re_scan:
     func->max_stack_cell_num = loader_ctx->max_stack_cell_num;
 #endif
     func->max_block_num = loader_ctx->max_csp_num;
+
+    /* Hand the static block table to the function (replace any from a
+       previous scan pass for the fast interpreter). */
+    if (func->block_table)
+        wasm_runtime_free(func->block_table);
+    func->block_table = bt_table;
+    func->block_table_count = bt_count;
+    bt_table = NULL;
+
     return_value = true;
 
 fail:
+    if (bt_table)
+        wasm_runtime_free(bt_table);
     wasm_loader_ctx_destroy(loader_ctx);
 
     (void)table_idx;
