@@ -206,8 +206,7 @@ wasm_cluster_is_thread_terminated(WASMExecEnv *exec_env);
 
 #if WASM_ENABLE_DEBUG_INTERP != 0 || WASM_ENABLE_CR != 0
 #define IS_WAMR_CHECKPOINT_SIG(signo) ((signo) == WAMR_SIG_CHECKPOINT)
-#endif
-#if WASM_ENABLE_DEBUG_INTERP != 0 || WASM_ENABLE_CR != 0
+
 struct WASMCurrentEnvStatus {
     bh_atomic_32_t signal_flag;
     uint64 step_count : 16;
@@ -281,6 +280,17 @@ wasm_cluster_thread_step(WASMExecEnv *exec_env);
 void
 wasm_cluster_set_debug_inst(WASMCluster *cluster, WASMDebugInstance *inst);
 #endif
+
+#else
+
+#define IS_WAMR_CHECKPOINT_SIG(signo) (false)
+
+static inline uint32
+wasm_cluster_get_thread_signal(const WASMExecEnv *exec_env)
+{
+    (void)exec_env;
+    return 0;
+}
 
 #endif /* end of WASM_ENABLE_DEBUG_INTERP != 0 || WASM_ENABLE_CR != 0 */
 

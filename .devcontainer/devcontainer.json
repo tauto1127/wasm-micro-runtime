@@ -4,22 +4,11 @@
 // https://github.com/microsoft/vscode-dev-containers/tree/v0.245.2/containers/cpp
 {
   "name": "WAMR-Dev",
-  "build": {
-    "dockerfile": "Dockerfile",
-    // Update 'VARIANT' to pick an Debian / Ubuntu OS version: debian-12, debian-11, debian-10, debian-9, ubuntu-21.04, ubuntu-20.04, ubuntu-18.04
-    // Use Debian 12, Debian 11, Debian 9, Ubuntu 18.04 or Ubuntu 21.04 on local arm64/Apple Silicon
-    "args": {
-      "BINARYEN_VER": "114",
-      "BAZELISK_VER": "1.17.0",
-      "CMAKE_VER": "3.27.0",
-      "EMSDK_VER": "3.1.43",
-      "GH_CLI_VER": "2.32.0",
-      "LLVM_VER": "16",
-      "VARIANT": "debian-12",
-      "WASI_SDK_VER": "20",
-      "WABT_VER": "1.0.33"
-    }
-  },
+  "image": "takuto1127/ubuntu24-wamr-dev:v1.0",
+  "privileged": true,
+  "mounts": [
+    "source=${localEnv:HOME}/Code/ubuntu,target=/root/Code,type=bind"
+  ],
   "runArgs": [
     "--cap-add=SYS_PTRACE",
     "--security-opt",
@@ -46,5 +35,5 @@
   // Use 'postCreateCommand' to run commands after the container is created.
   "postCreateCommand": "curl https://sh.rustup.rs -sSf | bash -s -- -y",
   // Comment out this line to run as root instead.
-  "remoteUser": "vscode"
+  "remoteUser": "root"
 }
