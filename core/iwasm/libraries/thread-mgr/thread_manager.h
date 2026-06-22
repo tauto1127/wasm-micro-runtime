@@ -7,7 +7,9 @@
 #define _THREAD_MANAGER_H
 
 #include "bh_common.h"
+#include "bh_atomic.h"
 #include "bh_log.h"
+#include "platform_internal.h"
 #include "wasm_export.h"
 #include "../interpreter/wasm.h"
 #include "../common/wasm_runtime_common.h"
@@ -19,6 +21,13 @@ extern "C" {
 #if WASM_ENABLE_DEBUG_INTERP != 0
 typedef struct WASMDebugInstance WASMDebugInstance;
 #endif
+
+struct AtomicCounter{
+    // C/R機構用
+    int checkpointing_count;
+    korp_mutex lock;
+    korp_cond cond;
+};
 
 struct WASMCluster {
     struct WASMCluster *next;
@@ -58,6 +67,7 @@ struct WASMCluster {
      */
     Vector exception_frames;
 #endif
+    struct AtomicCounter* checkpointing_counter;
 };
 
 void
@@ -172,22 +182,42 @@ wasm_cluster_is_thread_terminated(WASMExecEnv *exec_env);
 #define WAMR_SIG_STOP (19)
 #define WAMR_SIG_TERM (15)
 #define WAMR_SIG_SINGSTEP (0x1ff)
+#endif
 
+#if WASM_ENABLE_DEBUG_INTERP != 0 || WASM_ENABLE_CR != 0
+#define WAMR_SIG_CHECKPOINT (20)
+#define WAMR_SIG_RESTORE (21)
+#endif
+
+#if WASM_ENABLE_DEBUG_INTERP != 0 || WASM_ENABLE_CR != 0
 #define STATUS_RUNNING (0)
 #define STATUS_STOP (1)
 #define STATUS_EXIT (2)
 #define STATUS_STEP (3)
+#define STATUS_CHECKPOINT_READY (4)
+#endif
 
+#if WASM_ENABLE_DEBUG_INTERP != 0
 #define IS_WAMR_TERM_SIG(signo) ((signo) == WAMR_SIG_TERM)
 
 #define IS_WAMR_STOP_SIG(signo) \
     ((signo) == WAMR_SIG_STOP || (signo) == WAMR_SIG_TRAP)
+#endif
+
+#if WASM_ENABLE_DEBUG_INTERP != 0 || WASM_ENABLE_CR != 0
+#define IS_WAMR_CHECKPOINT_SIG(signo) ((signo) == WAMR_SIG_CHECKPOINT)
 
 struct WASMCurrentEnvStatus {
-    uint64 signal_flag : 32;
+    bh_atomic_32_t signal_flag;
     uint64 step_count : 16;
     uint64 running_status : 16;
 };
+
+static inline uint32
+wasm_cluster_get_thread_signal(const WASMExecEnv *exec_env)
+{
+    return BH_ATOMIC_32_LOAD(exec_env->current_status->signal_flag);
+}
 
 WASMCurrentEnvStatus *
 wasm_cluster_create_exenv_status();
@@ -205,10 +235,37 @@ void
 wasm_cluster_thread_waiting_run(WASMExecEnv *exec_env);
 
 void
+wasm_cluster_thread_checkpoint_ready(WASMExecEnv *exec_env);
+
+struct AtomicCounter*
+wasm_cluster_init_checkpointing_counter(WASMCluster *cluster, int count);
+
+void wasm_cluster_decrease_checkpointing_counter(WASMCluster *cluster);
+void wasm_cluster_increase_checkpointing_counter(WASMCluster *cluster);
+void wasm_cluster_reset_checkpointing_counter(WASMCluster *cluster);
+
+int
+wasm_cluster_get_waiting_thread_count(WASMCluster *cluster);
+
+int *
+wasm_cluster_get_waiting_thread_ids(WASMCluster *cluster);
+
+void
+wasm_cluster_wake_up_threads(WASMCluster *cluster);
+
+int
+wasm_cluster_get_thread_count(WASMCluster *cluster);
+
+int* wasm_cluster_get_thread_ids(WASMCluster *cluster);
+
+void
 wasm_cluster_wait_thread_status(WASMExecEnv *exec_env, uint32 *status);
 
 void
 wasm_cluster_thread_exited(WASMExecEnv *exec_env);
+
+void
+wasm_cluster_thread_continue_all(WASMCluster *cluster);
 
 void
 wasm_cluster_thread_continue(WASMExecEnv *exec_env);
@@ -219,10 +276,23 @@ wasm_cluster_thread_send_signal(WASMExecEnv *exec_env, uint32 signo);
 void
 wasm_cluster_thread_step(WASMExecEnv *exec_env);
 
+#if WASM_ENABLE_DEBUG_INTERP != 0
 void
 wasm_cluster_set_debug_inst(WASMCluster *cluster, WASMDebugInstance *inst);
+#endif
 
-#endif /* end of WASM_ENABLE_DEBUG_INTERP != 0 */
+#else
+
+#define IS_WAMR_CHECKPOINT_SIG(signo) (false)
+
+static inline uint32
+wasm_cluster_get_thread_signal(const WASMExecEnv *exec_env)
+{
+    (void)exec_env;
+    return 0;
+}
+
+#endif /* end of WASM_ENABLE_DEBUG_INTERP != 0 || WASM_ENABLE_CR != 0 */
 
 void
 wasm_cluster_traverse_lock(WASMExecEnv *exec_env);

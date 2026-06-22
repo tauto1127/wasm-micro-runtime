@@ -4,9 +4,13 @@
  */
 
 #include "bh_log.h"
+#include "platform_api_vmcore.h"
+#include "wasm_export.h"
 #include "wasm_shared_memory.h"
+#include "bh_hashmap.h"
 #if WASM_ENABLE_THREAD_MGR != 0
 #include "../libraries/thread-mgr/thread_manager.h"
+#include "../libraries/lib-wasi-threads/lib_wasi_threads_wrapper.h"
 #endif
 
 /*
@@ -37,6 +41,9 @@ typedef struct AtomicWaitInfo {
 typedef struct AtomicWaitNode {
     bh_list_link l;
     uint8 status;
+#if WASM_ENABLE_THREAD_MGR != 0
+    WASMExecEnv *exec_env;
+#endif
     korp_cond wait_cond;
 } AtomicWaitNode;
 
@@ -51,6 +58,20 @@ wait_address_equal(void *h1, void *h2);
 
 static void
 destroy_wait_info(void *wait_info);
+
+#if WASM_ENABLE_THREAD_MGR != 0
+static void
+wait_count_cb(void *key, void *value, void *user_data);
+
+static void
+wait_tid_collect_cb(void *key, void *value, void *user_data);
+
+typedef struct WaitTidCollectCtx {
+    int *tids;
+    int idx;
+    int cap;
+} WaitTidCollectCtx;
+#endif
 
 bool
 wasm_shared_memory_init()
@@ -96,10 +117,12 @@ shared_memory_dec_reference(WASMMemoryInstance *memory)
 {
     bh_assert(shared_memory_is_shared(memory));
     uint16 old;
+    // 普通のマシンなら1
 #if BH_ATOMIC_16_IS_ATOMIC == 0
     os_mutex_lock(&g_shared_memory_lock);
 #endif
     old = BH_ATOMIC_16_FETCH_SUB(memory->ref_count, 1);
+    // 普通のマシンなら1
 #if BH_ATOMIC_16_IS_ATOMIC == 0
     os_mutex_unlock(&g_shared_memory_lock);
 #endif
@@ -315,6 +338,10 @@ wasm_runtime_atomic_wait(WASMModuleInstanceCommon *module, void *address,
     }
 
     wait_node->status = S_WAITING;
+#if WASM_ENABLE_THREAD_MGR != 0
+    /* remember the exec env to allow waking/inspection from wait_map */
+    wait_node->exec_env = exec_env;
+#endif
 
     /* Acquire the wait info, create new one if not exists */
     wait_info = acquire_wait_info(address, wait_node);
@@ -331,12 +358,20 @@ wasm_runtime_atomic_wait(WASMModuleInstanceCommon *module, void *address,
     timeout_left = (uint64)timeout / 1000;
     timeout_1sec = (uint64)1e6;
 
+    bool is_checkpoint = false;
+
     while (1) {
         if (timeout < 0) {
             /* wait forever until it is notified or terminated
                here we keep waiting and checking every second */
-            os_cond_reltimedwait(&wait_node->wait_cond, lock,
+               os_cond_reltimedwait(&wait_node->wait_cond, lock,
                                  (uint64)timeout_1sec);
+            // チェックポイント通知が来てる場合
+            if (IS_WAMR_CHECKPOINT_SIG(
+                    wasm_cluster_get_thread_signal(exec_env))) {
+                is_checkpoint = true;
+                break;
+            }
             if (wait_node->status == S_NOTIFIED /* notified by atomic.notify */
 #if WASM_ENABLE_THREAD_MGR != 0
                 /* terminated by other thread */
@@ -350,6 +385,12 @@ wasm_runtime_atomic_wait(WASMModuleInstanceCommon *module, void *address,
             timeout_wait =
                 timeout_left < timeout_1sec ? timeout_left : timeout_1sec;
             os_cond_reltimedwait(&wait_node->wait_cond, lock, timeout_wait);
+            // チェックポイント通知が来てる場合
+            if (IS_WAMR_CHECKPOINT_SIG(
+                    wasm_cluster_get_thread_signal(exec_env))) {
+                is_checkpoint = true;
+                break;
+            }
             if (wait_node->status == S_NOTIFIED /* notified by atomic.notify */
                 || timeout_left <= timeout_wait /* time out */
 #if WASM_ENABLE_THREAD_MGR != 0
@@ -378,6 +419,11 @@ wasm_runtime_atomic_wait(WASMModuleInstanceCommon *module, void *address,
     map_try_release_wait_info(wait_map, wait_info, address);
 
     os_mutex_unlock(lock);
+
+    if(is_checkpoint) {
+        // チェックポイントで通知したことを表す
+        return 3;
+    }
 
     return is_timeout ? 2 : 0;
 }
@@ -434,3 +480,147 @@ wasm_runtime_atomic_notify(WASMModuleInstanceCommon *module, void *address,
 
     return notify_result;
 }
+
+#if WASM_ENABLE_THREAD_MGR != 0
+
+// waitノードを数えるコールバック
+static void
+wait_count_cb(void *key, void *value, void *user_data)
+{
+    (void)key;
+    AtomicWaitInfo *info = (AtomicWaitInfo *)value;
+    uint32 *total = (uint32 *)user_data;
+    AtomicWaitNode *node = bh_list_first_elem(info->wait_list);
+
+    while (node) {
+        (*total)++;
+        node = bh_list_elem_next(node);
+    }
+}
+
+static void
+wake_wait_node_cb(void *key, void *value, void *user_data)
+{
+    (void)key;
+    AtomicWaitInfo *info = (AtomicWaitInfo *)value;
+    uint32 *total = (uint32 *)user_data;
+    AtomicWaitNode *node = bh_list_first_elem(info->wait_list);
+
+    while (node) {
+        node->status = S_NOTIFIED;
+        os_cond_signal(&node->wait_cond);
+        (*total)++;
+        node = bh_list_elem_next(node);
+    }
+}
+
+HashMap *
+get_wait_map(void)
+{
+    return wait_map;
+}
+
+int
+get_wait_node_count(void)
+{
+    uint32 total = 0;
+
+    os_mutex_lock(&g_shared_memory_lock);
+    if (wait_map) {
+        bh_hash_map_traverse(wait_map, wait_count_cb, &total);
+    }
+    os_mutex_unlock(&g_shared_memory_lock);
+
+    return (int)total;
+}
+
+int *
+get_wait_node_tids(void)
+{
+    int count = 0;
+    int *tids = NULL;
+    WaitTidCollectCtx ctx;
+
+    os_mutex_lock(&g_shared_memory_lock);
+    if (wait_map) {
+        bh_hash_map_traverse(wait_map, wait_count_cb, &count);
+    }
+
+    /* +1 for the -2 sentinel */
+    tids = wasm_runtime_malloc(sizeof(int) * (uint32)(count + 1));
+    if (!tids) {
+        os_mutex_unlock(&g_shared_memory_lock);
+        return NULL;
+    }
+
+    ctx.tids = tids;
+    ctx.idx = 0;
+    ctx.cap = count;
+
+    if (wait_map && count > 0) {
+        bh_hash_map_traverse(wait_map, wait_tid_collect_cb, &ctx);
+    }
+    os_mutex_unlock(&g_shared_memory_lock);
+
+    tids[ctx.idx] = -2;
+
+    return tids;
+}
+
+static void
+wait_tid_collect_cb(void *key, void *value, void *user_data)
+{
+    (void)key;
+    AtomicWaitInfo *info = (AtomicWaitInfo *)value;
+    AtomicWaitNode *node = bh_list_first_elem(info->wait_list);
+    WaitTidCollectCtx *ctx = user_data;
+
+    while (node && ctx->idx < ctx->cap) {
+        int tid = -1;
+
+        if (node->exec_env && node->exec_env->thread_arg) {
+            ThreadStartArg *arg = (ThreadStartArg *)node->exec_env->thread_arg;
+            tid = arg->thread_id;
+        }
+
+        ctx->tids[ctx->idx++] = tid;
+        node = bh_list_elem_next(node);
+    }
+}
+
+/* Backward compatibility helper used by thread_manager.c */
+int *
+get_wait_node_ids(void)
+{
+    return get_wait_node_tids();
+}
+
+uint32
+wasm_shared_memory_get_waiters_count(void)
+{
+    uint32 total = 0;
+
+    os_mutex_lock(&g_shared_memory_lock);
+    if (wait_map) {
+        bh_hash_map_traverse(wait_map, wait_count_cb, &total);
+    }
+    os_mutex_unlock(&g_shared_memory_lock);
+
+    return total;
+}
+
+uint32
+wasm_shared_memory_wake_waiters(void)
+{
+    uint32 total = 0;
+
+    os_mutex_lock(&g_shared_memory_lock);
+    if (wait_map) {
+        bh_hash_map_traverse(wait_map, wake_wait_node_cb, &total);
+    }
+    os_mutex_unlock(&g_shared_memory_lock);
+
+    return total;
+}
+
+#endif /* WASM_ENABLE_THREAD_MGR != 0 */

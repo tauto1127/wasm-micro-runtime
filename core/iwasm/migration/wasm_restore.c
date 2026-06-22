@@ -1,15 +1,22 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "../common/wasm_exec_env.h"
 #include "../common/wasm_memory.h"
 #include "../interpreter/wasm_runtime.h"
+#include "platform_common.h"
+#include "thread_manager.h"
+#include "wasm_export.h"
 #include "wasm_migration.h"
 #include "wasm_restore.h"
+#include "lib_wasi_threads_wrapper.h"
+#include "wasm_dump.h"
 
 static bool restore_flag;
 void set_restore_flag(bool f)
 {
+    printf("restore flag set \n");
     restore_flag = f;
 }
 bool get_restore_flag()
@@ -84,6 +91,7 @@ _restore_stack(WASMExecEnv *exec_env, WASMInterpFrame *frame, FILE *fp)
     for (uint32 i = 0; i < type_stack_size; ++i) {
         value_stack_size += type_stack[i];
     }
+
     frame->sp = frame->sp_bottom + value_stack_size;
 
     // 値スタックの中身
@@ -127,8 +135,9 @@ _restore_stack(WASMExecEnv *exec_env, WASMInterpFrame *frame, FILE *fp)
 }
 
 WASMInterpFrame*
-wasm_restore_stack(WASMExecEnv **_exec_env)
+wasm_restore_stack(WASMExecEnv **_exec_env, char* file_prefix)
 {
+    printf("restore stack\n");
     WASMExecEnv *exec_env = *_exec_env;
     WASMModuleInstance *module_inst =
         (WASMModuleInstance *)exec_env->module_inst;
@@ -139,15 +148,20 @@ wasm_restore_stack(WASMExecEnv **_exec_env)
     FILE *fp;
 
     uint32 frame_stack_size;
-    fp = open_image("frame.img", "rb");
+    char file_name_frame[MAX_FILE_NAME_LENGTH] = "frame_count.img";
+    str_add_prefix(file_name_frame, file_prefix);
+    fp = open_image(file_name_frame, "rb");
     fread(&frame_stack_size, sizeof(uint32), 1, fp);
     fclose(fp);
 
-    char file[32];
     uint32 fidx = 0;
+    printf("for文\n");
+    char file_name_stack[MAX_FILE_NAME_LENGTH] = "";
     for (uint32 i = frame_stack_size; i > 0; --i) {
-        sprintf(file, "stack%d.img", i);
-        fp = open_image(file, "rb");
+        // char* file_name_stack = wasm_runtime_malloc(sizeof(char) * MAX_FILE_NAME_LENGTH);
+        sprintf(file_name_stack, "stack%d.img", i);
+        str_add_prefix(file_name_stack, file_prefix);
+        fp = open_image(file_name_stack, "rb");
 
         fread(&fidx, sizeof(uint32), 1, fp);
         // 関数からスタックサイズを計算し,ALLOC
@@ -174,8 +188,9 @@ wasm_restore_stack(WASMExecEnv **_exec_env)
     }
 
     wasm_exec_env_set_cur_frame(exec_env, frame);
-    
+
     _exec_env = &exec_env;
+    printf("done wasm_restore_stack\n");
 
     return frame;
 }
@@ -197,9 +212,15 @@ void restore_dirty_memory(WASMMemoryInstance **memory, FILE* memory_fp) {
     }
 }
 
-int wasm_restore_memory(WASMModuleInstance *module, WASMMemoryInstance **memory, uint8** maddr) {
-    FILE* memory_fp = open_image("memory.img", "rb");
-    FILE* mem_size_fp = open_image("mem_page_count.img", "rb");
+int wasm_restore_memory(WASMModuleInstance *module, WASMMemoryInstance **memory, uint8** maddr, char* file_prefix) {
+    char file_name_mem[MAX_FILE_NAME_LENGTH] = "memory.img";
+    str_add_prefix(file_name_mem, file_prefix);
+
+    char file_name_mem_size[MAX_FILE_NAME_LENGTH] = "mem_page_count.img";
+    str_add_prefix(file_name_mem_size, file_prefix);
+
+    FILE* memory_fp = open_image(file_name_mem, "rb");
+    FILE* mem_size_fp = open_image(file_name_mem_size, "rb");
 
     // restore page_count
     uint32 page_count;
@@ -217,8 +238,10 @@ int wasm_restore_memory(WASMModuleInstance *module, WASMMemoryInstance **memory,
     return 0;
 }
 
-int wasm_restore_global(const WASMModuleInstance *module, const WASMGlobalInstance *globals, uint8 **global_data, uint8 **global_addr) {
-    FILE* fp = open_image("global.img", "rb");
+int wasm_restore_global(const WASMModuleInstance *module, const WASMGlobalInstance *globals, uint8 **global_data, uint8 **global_addr, char* file_prefix) {
+    char file_name_global[MAX_FILE_NAME_LENGTH] = "global.img";
+    str_add_prefix(file_name_global, file_prefix);
+    FILE* fp = open_image(file_name_global, "rb");
 
     for (int i = 0; i < module->e->global_count; i++) {
         switch (globals[i].type) {
@@ -245,15 +268,19 @@ int wasm_restore_global(const WASMModuleInstance *module, const WASMGlobalInstan
 
 int wasm_restore_program_counter(
     WASMModuleInstance *module,
-    uint8 **frame_ip)
+    uint8 **frame_ip,
+    char* file_prefix)
 {
-    FILE* fp = open_image("program_counter.img", "rb");
+    char file_name_pc[MAX_FILE_NAME_LENGTH] = "program_counter.img";
+    str_add_prefix(file_name_pc, file_prefix);
+    FILE* fp = open_image(file_name_pc, "rb");
 
     uint32 fidx, offset;
     fread(&fidx, sizeof(uint32), 1, fp);
     fread(&offset, sizeof(uint32), 1, fp);
 
     *frame_ip = wasm_get_func_code(module->e->functions + fidx) + offset;
+    fclose(fp);
 
     return 0;
 }
@@ -275,29 +302,122 @@ int wasm_restore(WASMModuleInstance **module,
             uint8 **else_addr,
             uint8 **end_addr,
             uint8 **maddr,
-            bool *done_flag)
+            bool *done_flag,
+            char* file_prefix)
 {
     struct timespec ts1, ts2;
-    // restore memory
-    clock_gettime(CLOCK_MONOTONIC, &ts1);
-    wasm_restore_memory(*module, memory, maddr);
-    clock_gettime(CLOCK_MONOTONIC, &ts2);
-    fprintf(stderr, "memory, %lu\n", get_time(ts1, ts2));
-    // printf("Success to restore linear memory\n");
+    // メインスレッドのみ復元
+    if (strcmp(file_prefix, MAIN_THREAD_PREFIX) == 0) {
+        // restore memory
+        clock_gettime(CLOCK_MONOTONIC, &ts1);
+        wasm_restore_memory(*module, memory, maddr, file_prefix);
+        clock_gettime(CLOCK_MONOTONIC, &ts2);
+        fprintf(stderr, "memory, %lu\n", get_time(ts1, ts2));
+        // printf("Success to restore linear memory\n");
+    }
 
     // restore globals
     clock_gettime(CLOCK_MONOTONIC, &ts1);
-    wasm_restore_global(*module, *globals, global_data, global_addr);
+    wasm_restore_global(*module, *globals, global_data, global_addr, file_prefix);
     clock_gettime(CLOCK_MONOTONIC, &ts2);
     fprintf(stderr, "global, %lu\n", get_time(ts1, ts2));
     // printf("Success to restore globals\n");
 
     // restore program counter
     clock_gettime(CLOCK_MONOTONIC, &ts1);
-    wasm_restore_program_counter(*module, frame_ip);
+    wasm_restore_program_counter(*module, frame_ip, file_prefix);
     clock_gettime(CLOCK_MONOTONIC, &ts2);
     fprintf(stderr, "program counter, %lu\n", get_time(ts1, ts2));
     // printf("Success to program counter\n");
+
+    return 0;
+}
+
+int wasm_restore_thread_start_arg(ThreadStartArg* thread_start_arg, wasm_module_inst_t new_module_inst, char* file_prefix) {
+    char file_name[MAX_FILE_NAME_LENGTH] = "thread_state.img";
+    str_add_prefix(file_name, file_prefix);
+    FILE *fp = open_image(file_name, "rb");
+    printf("-==============================restore\n");
+    fread(&thread_start_arg->thread_id, sizeof(int32), 1, fp);
+    printf("thread %d restore\n", thread_start_arg->thread_id);
+    fread(&thread_start_arg->arg, sizeof(uint32), 1, fp);
+
+    WASMFunctionInstanceCommon* start_func =
+        wasm_runtime_lookup_function(new_module_inst, THREAD_START_FUNCTION);
+    if (!start_func) {
+        LOG_ERROR("Failed to find thread start function %s",
+                  THREAD_START_FUNCTION);
+        goto thread_preparation_fail;
+    }
+
+    thread_start_arg->start_func = (wasm_function_inst_t *)start_func;
+    fclose(fp);
+
+    return 0;
+
+    thread_preparation_fail:
+        if (new_module_inst)
+            wasm_runtime_deinstantiate_internal(new_module_inst, true);
+        if (thread_start_arg)
+            wasm_runtime_free(thread_start_arg);
+
+        return -1;
+    // wasm_runtime_lookup_function(new_module_inst, THREAD_START_FUNCTION);
+    /*wasm_function_inst_t* func = thread_arg->func;*/\
+    /*os_mutex_unlock(&exec_env->wait_lock);\*/\
+}
+
+// restore wasm thread and start execution
+// 親のフラグを継承する
+int wasm_restore_thread(wasm_exec_env_t parent_exec_env, char* file_prefix) {
+    // モジュールインスタンスを作成する．
+    wasm_module_t module = wasm_exec_env_get_module(parent_exec_env);
+    wasm_module_inst_t module_inst = get_module_inst(parent_exec_env);
+    wasm_module_inst_t new_module_inst = NULL;
+    ThreadStartArg *thread_start_arg = NULL;
+    wasm_function_inst_t start_func;
+    int32 thread_id;
+    uint32 stack_size = 8192;
+    int32 ret = -1;
+
+    bh_assert(module);
+    bh_assert(module_inst);
+
+    // モジュールインスタンスの生成
+    stack_size = ((WASMModuleInstance *)module_inst)->default_wasm_stack_size;
+
+    printf("start init module inst\n");
+    if (!(new_module_inst = wasm_runtime_instantiate_internal(
+              module, module_inst, parent_exec_env, stack_size, 0, 0, true, NULL, 0))){
+                  printf("Failed to create new module inst\n");
+                  return -1;
+              }
+
+    printf("done init module inst\n");
+
+    // 親からカスタムデータなどを引き継ぐ
+    wasm_runtime_set_custom_data_internal(
+        new_module_inst, wasm_runtime_get_custom_data(module_inst));
+    printf("done init custom\n");
+
+    // if (!(wasm_cluster_dup_c_api_imports(new_module_inst, module_inst)))
+    //     goto thread_preparation_fail;
+
+    wasm_native_inherit_contexts(new_module_inst, module_inst);
+    printf("done init contexts\n");
+
+    // スレッド開始に必要な引数を復元
+    if (!(thread_start_arg = wasm_runtime_malloc(sizeof(ThreadStartArg)))) {
+        LOG_ERROR("Runtime args allocation failed");
+    }
+    printf("%sStart constructing Wasm VM\n", file_prefix);
+    wasm_restore_thread_start_arg(thread_start_arg, new_module_inst, file_prefix);
+    printf("%sStart constructing Wasm VM\n", file_prefix);
+
+    // is_aux_stack_allocatedはthreads_spawn_wrapperに合わせてfalse にする
+    // aux_stack_start, sizeも
+    // ここでexec_envを作っている
+    wasm_cluster_create_thread(parent_exec_env, new_module_inst, false, 0, 0, thread_start, thread_start_arg);
 
     return 0;
 }

@@ -165,8 +165,8 @@ control_thread_routine(void *arg)
                     uint32 status;
                     korp_tid tid;
 
-                    status = (uint32)debug_inst->stopped_thread->current_status
-                                 ->signal_flag;
+                    status = wasm_cluster_get_thread_signal(
+                        debug_inst->stopped_thread);
                     tid = debug_inst->stopped_thread->handle;
 
                     if (debug_inst->stopped_thread->current_status
@@ -602,7 +602,7 @@ wasm_debug_instance_get_thread_status(WASMDebugInstance *instance, korp_tid tid)
     exec_env = bh_list_first_elem(&instance->cluster->exec_env_list);
     while (exec_env) {
         if (exec_env->handle == tid) {
-            return (uint32)exec_env->current_status->signal_flag;
+            return wasm_cluster_get_thread_signal(exec_env);
         }
         exec_env = bh_list_elem_next(exec_env);
     }

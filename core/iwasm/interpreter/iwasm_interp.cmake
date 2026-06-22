@@ -26,4 +26,3 @@ file (GLOB_RECURSE source_all
 )
 
 set (IWASM_INTERP_SOURCE ${source_all})
-

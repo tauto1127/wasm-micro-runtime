@@ -4,16 +4,26 @@
 #include "../common/wasm_exec_env.h"
 #include "../interpreter/wasm_interp.h"
 
+void set_image_dir(char *dir);
+char *get_image_dir(void);
+FILE *open_image(const char *file, const char *flag);
+
 void wasm_set_checkpoint(bool f);
 bool wasm_get_checkpoint();
+// void checkpoint_routine(WASMCluster *cluster);
+// nopからのチェックポイント用
+#if WASM_ENABLE_CR != 0
+void* checkpoint_thread_routine(void* arg);
+extern struct timespec startAtNop, endAtNop;
+#endif
 
 int wasm_dump(WASMExecEnv *exec_env,
-         WASMModuleInstance *module,
-         WASMMemoryInstance *memory,
-         WASMGlobalInstance *globals,
+         struct WASMModuleInstance *module,
+         struct WASMMemoryInstance *memory,
+         struct WASMGlobalInstance *globals,
          uint8 *global_data,
          uint8 *global_addr,
-         WASMFunctionInstance *cur_func,
+         struct WASMFunctionInstance *cur_func,
          struct WASMInterpFrame *frame,
          register uint8 *frame_ip,
          register uint32 *frame_sp,
@@ -23,7 +33,19 @@ int wasm_dump(WASMExecEnv *exec_env,
          uint8 *else_addr,
          uint8 *end_addr,
          uint8 *maddr,
-         bool done_flag);
+         bool done_flag,
+         char *file_prefix);
 
+void str_add_prefix(char* file_name, char* file_prefix);
 
 #endif // _WASM_CHECKPOINT_H
+
+#if WASM_ENABLE_CR != 0
+void* signal_control_routine(void *arg);
+char* get_file_prefix(int32 thread_id);
+#endif
+
+#if WASM_ENABLE_CR != 0
+#define MAIN_THREAD_PREFIX "main-"
+#define MAX_FILE_NAME_LENGTH 100
+#endif

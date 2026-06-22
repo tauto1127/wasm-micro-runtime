@@ -5,12 +5,29 @@
 
 #include "thread_manager.h"
 #include "../common/wasm_c_api_internal.h"
+#include "platform_api_extension.h"
+#include "platform_api_vmcore.h"
+#include "platform_common.h"
+#include "wasm_exec_env.h"
+#include "wasm_export.h"
+#include <signal.h>
+#include <string.h>
+#include <lib_wasi_threads_wrapper.h>
+
+static void
+noop_usr_handler(int signo)
+{
+    (void)signo;
+}
 
 #if WASM_ENABLE_INTERP != 0
 #include "../interpreter/wasm_runtime.h"
 #endif
 #if WASM_ENABLE_AOT != 0
 #include "../aot/aot_runtime.h"
+#endif
+#if WASM_ENABLE_THREAD_MGR != 0 && WASM_ENABLE_SHARED_MEMORY != 0
+#include "../common/wasm_shared_memory.h"
 #endif
 
 #if WASM_ENABLE_DEBUG_INTERP != 0
@@ -47,6 +64,24 @@ wasm_cluster_set_max_thread_num(uint32 num)
 bool
 thread_manager_init()
 {
+    /* Block SIGUSR1/SIGUSR2 in the main thread so newly spawned threads
+     * inherit the mask; a dedicated sigwait thread will consume them. */
+    sigset_t set;
+    sigemptyset(&set);
+    sigaddset(&set, SIGUSR1);
+    sigaddset(&set, SIGUSR2);
+    pthread_sigmask(SIG_BLOCK, &set, NULL);
+
+    /* Install no-op handlers to avoid default terminate if a thread
+     * temporarily unmasks these signals. Blocked signals still work with
+     * sigwait. */
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = noop_usr_handler;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGUSR1, &sa, NULL);
+    sigaction(SIGUSR2, &sa, NULL);
+
     if (bh_list_init(cluster_list) != 0)
         return false;
     if (os_mutex_init(&cluster_list_lock) != 0)
@@ -506,7 +541,7 @@ wasm_cluster_spawn_exec_env(WASMExecEnv *exec_env)
     }
 
     if (!(new_module_inst = wasm_runtime_instantiate_internal(
-              module, module_inst, exec_env, stack_size, 0, 0, NULL, 0))) {
+              module, module_inst, exec_env, stack_size, 0, 0, false, NULL, 0))) {
         return NULL;
     }
 
@@ -722,6 +757,7 @@ wasm_cluster_create_thread(WASMExecEnv *exec_env,
     if (!new_exec_env)
         goto fail1;
 
+    // mros2wasmではfalse
     if (is_aux_stack_allocated) {
         /* Set aux stack for current thread */
         if (!wasm_exec_env_set_aux_stack(new_exec_env, aux_stack_start,
@@ -740,6 +776,14 @@ wasm_cluster_create_thread(WASMExecEnv *exec_env,
     /* Inherit suspend_flags of parent thread */
     new_exec_env->suspend_flags.flags =
         (exec_env->suspend_flags.flags & WASM_SUSPEND_FLAG_INHERIT_MASK);
+
+#if WASM_ENABLE_DEBUG_INTERP != 0 || WASM_ENABLE_CR != 0
+    /* Inherit restore signal state when debug/C-R signal handling is enabled. */
+    if (wasm_cluster_get_thread_signal(exec_env) == WAMR_SIG_RESTORE) {
+        BH_ATOMIC_32_STORE(new_exec_env->current_status->signal_flag,
+                           WAMR_SIG_RESTORE);
+    }
+#endif
 
     if (!wasm_cluster_add_exec_env(cluster, new_exec_env))
         goto fail2;
@@ -822,7 +866,24 @@ wasm_cluster_dup_c_api_imports(WASMModuleInstanceCommon *module_inst_dst,
     return true;
 }
 
-#if WASM_ENABLE_DEBUG_INTERP != 0
+#if WASM_ENABLE_DEBUG_INTERP != 0 || WASM_ENABLE_CR != 0
+inline static bool
+wasm_cluster_thread_is_running(WASMExecEnv *exec_env)
+{
+    return exec_env->current_status->running_status == STATUS_RUNNING
+           || exec_env->current_status->running_status == STATUS_STEP;
+}
+#endif
+
+#if WASM_ENABLE_CR != 0
+void
+wasm_cluster_thread_checkpoint_ready(WASMExecEnv *exec_env)
+{
+    exec_env->current_status->running_status = STATUS_CHECKPOINT_READY;
+}
+#endif /* WASM_ENABLE_CR != 0 */
+
+#if WASM_ENABLE_DEBUG_INTERP != 0 || WASM_ENABLE_CR != 0
 WASMCurrentEnvStatus *
 wasm_cluster_create_exenv_status()
 {
@@ -833,7 +894,7 @@ wasm_cluster_create_exenv_status()
     }
 
     status->step_count = 0;
-    status->signal_flag = 0;
+    BH_ATOMIC_32_STORE(status->signal_flag, 0);
     status->running_status = 0;
     return status;
 }
@@ -844,25 +905,19 @@ wasm_cluster_destroy_exenv_status(WASMCurrentEnvStatus *status)
     wasm_runtime_free(status);
 }
 
-inline static bool
-wasm_cluster_thread_is_running(WASMExecEnv *exec_env)
-{
-    return exec_env->current_status->running_status == STATUS_RUNNING
-           || exec_env->current_status->running_status == STATUS_STEP;
-}
-
 void
 wasm_cluster_clear_thread_signal(WASMExecEnv *exec_env)
 {
-    exec_env->current_status->signal_flag = 0;
+    BH_ATOMIC_32_STORE(exec_env->current_status->signal_flag, 0);
 }
 
 void
 wasm_cluster_thread_send_signal(WASMExecEnv *exec_env, uint32 signo)
 {
-    exec_env->current_status->signal_flag = signo;
+    BH_ATOMIC_32_STORE(exec_env->current_status->signal_flag, signo);
 }
 
+#if WASM_ENABLE_DEBUG_INTERP != 0
 static void
 notify_debug_instance(WASMExecEnv *exec_env)
 {
@@ -892,6 +947,19 @@ notify_debug_instance_exit(WASMExecEnv *exec_env)
 
     on_thread_exit_event(cluster->debug_inst, exec_env);
 }
+#else
+static inline void
+notify_debug_instance(WASMExecEnv *exec_env)
+{
+    (void)exec_env;
+}
+
+static inline void
+notify_debug_instance_exit(WASMExecEnv *exec_env)
+{
+    (void)exec_env;
+}
+#endif /* WASM_ENABLE_DEBUG_INTERP */
 
 void
 wasm_cluster_thread_waiting_run(WASMExecEnv *exec_env)
@@ -903,6 +971,127 @@ wasm_cluster_thread_waiting_run(WASMExecEnv *exec_env)
         os_cond_wait(&exec_env->wait_cond, &exec_env->wait_lock);
     }
 }
+
+#if WASM_ENABLE_CR != 0
+struct AtomicCounter *
+wasm_cluster_init_checkpointing_counter(WASMCluster *cluster, int count)
+{
+    if(cluster->checkpointing_counter != NULL) {
+        os_mutex_lock(&cluster->checkpointing_counter->lock);
+        cluster->checkpointing_counter->checkpointing_count = count;
+        os_mutex_unlock(&cluster->checkpointing_counter->lock);
+
+        return cluster->checkpointing_counter;
+    }
+    struct AtomicCounter *counter =
+        wasm_runtime_malloc(sizeof(struct AtomicCounter));
+    counter->checkpointing_count = count;
+    os_mutex_init(&counter->lock);
+    os_cond_init(&counter->cond);
+    os_mutex_lock(&cluster->lock);
+    cluster->checkpointing_counter = counter;
+    os_mutex_unlock(&cluster->lock);
+
+    return counter;
+}
+
+void
+wasm_cluster_decrease_checkpointing_counter(WASMCluster *cluster)
+{
+    os_mutex_lock(&cluster->lock);
+    struct AtomicCounter *counter = cluster->checkpointing_counter;
+
+    os_mutex_lock(&counter->lock);
+    counter->checkpointing_count--;
+    os_cond_signal(&counter->cond);
+    os_mutex_unlock(&counter->lock);
+
+    os_mutex_unlock(&cluster->lock);
+}
+
+void
+wasm_cluster_increase_checkpointing_counter(WASMCluster *cluster)
+{
+    os_mutex_lock(&cluster->lock);
+    struct AtomicCounter *counter = cluster->checkpointing_counter;
+    os_mutex_unlock(&cluster->lock);
+
+    os_mutex_lock(&counter->lock);
+    counter->checkpointing_count++;
+
+    os_cond_signal(&counter->cond);
+    os_mutex_unlock(&counter->lock);
+}
+
+void
+wasm_cluster_reset_checkpointing_counter(WASMCluster *cluster)
+{
+    os_mutex_lock(&cluster->lock);
+    cluster->checkpointing_counter = NULL;
+    os_mutex_unlock(&cluster->lock);
+}
+
+int
+wasm_cluster_get_thread_count(WASMCluster *cluster)
+{
+    int count = 0;
+    os_mutex_lock(&cluster->lock);
+    WASMExecEnv *env = bh_list_first_elem(&cluster->exec_env_list);
+    while (env) {
+        count++;
+        env = bh_list_elem_next(env);
+    }
+    os_mutex_unlock(&cluster->lock);
+    return count;
+}
+
+// 使われてるスレッドidを配列で返す．最後は-1で終端
+int* wasm_cluster_get_thread_ids(WASMCluster *cluster) {
+    os_mutex_lock(&cluster->lock);
+    // 最大スレッドサイズの設定値を入れる
+    int *thread_ids = wasm_runtime_malloc(sizeof(int[100]));
+    WASMExecEnv *env = bh_list_first_elem(&cluster->exec_env_list);
+    int count = 0;
+    while(env) {
+        ThreadStartArg *arg = (ThreadStartArg *)env->thread_arg;
+        if(arg == NULL) {
+            env = bh_list_elem_next(env);
+            continue;
+        }
+        thread_ids[count] = arg->thread_id;
+
+        count++;
+        env = bh_list_elem_next(env);
+    }
+    thread_ids[count] = -1;
+    os_mutex_unlock(&cluster->lock);
+
+    return thread_ids;
+}
+
+// 終端：-2, メインスレッド:-1
+int
+wasm_cluster_get_waiting_thread_count(WASMCluster *cluster)
+{
+    return get_wait_node_count();
+}
+
+int*
+wasm_cluster_get_waiting_thread_ids(WASMCluster *cluster) {
+    return get_wait_node_ids();
+}
+
+void
+wasm_cluster_wake_up_threads(WASMCluster *cluster)
+{
+    os_mutex_lock(&cluster->lock);
+#if WASM_ENABLE_SHARED_MEMORY != 0 && WASM_ENABLE_THREAD_MGR != 0
+    /* Wake all waiters stored in wait_map */
+    wasm_shared_memory_wake_waiters();
+#endif
+    os_mutex_unlock(&cluster->lock);
+}
+#endif /* WASM_ENABLE_CR != 0 */
 
 void
 wasm_cluster_send_signal_all(WASMCluster *cluster, uint32 signo)
@@ -922,8 +1111,26 @@ wasm_cluster_thread_exited(WASMExecEnv *exec_env)
 }
 
 void
+wasm_cluster_thread_continue_all(WASMCluster *cluster)
+{
+    WASMExecEnv *exec_env = bh_list_first_elem(&cluster->exec_env_list);
+    os_mutex_lock(&cluster->lock);
+    while (exec_env) {
+        ThreadStartArg *arg = (ThreadStartArg *)exec_env->thread_arg;
+        if(arg !=NULL ){
+        }
+        wasm_cluster_thread_continue(exec_env);
+        exec_env = bh_list_elem_next(exec_env);
+    }
+    os_mutex_unlock(&cluster->lock);
+}
+
+void
 wasm_cluster_thread_continue(WASMExecEnv *exec_env)
 {
+    if(exec_env->current_status->running_status != STATUS_STOP) {
+        return;
+    }
     os_mutex_lock(&exec_env->wait_lock);
     wasm_cluster_clear_thread_signal(exec_env);
     exec_env->current_status->running_status = STATUS_RUNNING;
@@ -940,13 +1147,15 @@ wasm_cluster_thread_step(WASMExecEnv *exec_env)
     os_mutex_unlock(&exec_env->wait_lock);
 }
 
+#if WASM_ENABLE_DEBUG_INTERP != 0
 void
 wasm_cluster_set_debug_inst(WASMCluster *cluster, WASMDebugInstance *inst)
 {
     cluster->debug_inst = inst;
 }
+#endif /* WASM_ENABLE_DEBUG_INTERP != 0 */
 
-#endif /* end of WASM_ENABLE_DEBUG_INTERP */
+#endif /* end of WASM_ENABLE_DEBUG_INTERP != 0 || WASM_ENABLE_CR != 0 */
 
 /* Check whether the exec_env is in one of all clusters, the caller
    should add lock to the cluster list before calling us */
@@ -1247,8 +1456,10 @@ suspend_thread_visitor(void *node, void *user_data)
     WASMExecEnv *curr_exec_env = (WASMExecEnv *)node;
     WASMExecEnv *exec_env = (WASMExecEnv *)user_data;
 
+    printf("suspend_thread_visitor\n");
     if (curr_exec_env == exec_env)
         return;
+    printf("suspend_thread_visitor returnしてない\n");
 
     wasm_cluster_suspend_thread(curr_exec_env);
 }

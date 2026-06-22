@@ -1,0 +1,13 @@
+{
+    "lsp": {
+        "clangd": {
+            "binary": {
+                "path": "/usr/bin/clangd",
+                "arguments": [
+                    "--compile-commands-dir=product-mini/platforms/linux/build",
+                    "--query-driver=/usr/bin/clangd-*,/usr/bin/gcc-*"
+                ]
+            }
+        }
+    }
+}

@@ -528,7 +528,7 @@ handle_threadstop_request(WASMGDBServer *server, char *payload)
     os_mutex_unlock(&debug_inst->wait_lock);
 
     tid = debug_inst->stopped_thread->handle;
-    status = (uint32)debug_inst->stopped_thread->current_status->signal_flag;
+    status = wasm_cluster_get_thread_signal(debug_inst->stopped_thread);
 
     wasm_debug_instance_set_cur_thread(debug_inst, tid);
 

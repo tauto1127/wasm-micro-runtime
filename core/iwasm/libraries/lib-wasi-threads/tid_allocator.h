@@ -39,6 +39,12 @@ tid_allocator_get_tid(TidAllocator *tid_allocator);
 void
 tid_allocator_release_tid(TidAllocator *tid_allocator, int32 thread_id);
 
+/* Restore allocator state by removing already-used thread ids
+   from the free-id stack. thread_ids points to an array of used ids. */
+void
+tid_allocator_restore(TidAllocator *tid_allocator, int32 *thread_ids,
+                      uint32 count);
+
 #ifdef __cplusplus
 }
 #endif

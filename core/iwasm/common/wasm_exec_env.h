@@ -21,7 +21,7 @@ struct WASMInterpFrame;
 
 #if WASM_ENABLE_THREAD_MGR != 0
 typedef struct WASMCluster WASMCluster;
-#if WASM_ENABLE_DEBUG_INTERP != 0
+#if WASM_ENABLE_DEBUG_INTERP != 0 || WASM_ENABLE_CR != 0
 typedef struct WASMCurrentEnvStatus WASMCurrentEnvStatus;
 #endif
 #endif
@@ -127,7 +127,7 @@ typedef struct WASMExecEnv {
     struct WASMLocalObjectRef *cur_local_object_ref;
 #endif
 
-#if WASM_ENABLE_DEBUG_INTERP != 0
+#if WASM_ENABLE_DEBUG_INTERP != 0 || WASM_ENABLE_CR != 0
     WASMCurrentEnvStatus *current_status;
 #endif
 

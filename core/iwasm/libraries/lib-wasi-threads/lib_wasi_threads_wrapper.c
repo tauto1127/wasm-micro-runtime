@@ -6,6 +6,7 @@
 #include "bh_log.h"
 #include "thread_manager.h"
 #include "tid_allocator.h"
+#include "lib_wasi_threads_wrapper.h"
 
 #if WASM_ENABLE_INTERP != 0
 #include "wasm_runtime.h"
@@ -15,18 +16,8 @@
 #include "aot_runtime.h"
 #endif
 
-static const char *THREAD_START_FUNCTION = "wasi_thread_start";
 static korp_mutex thread_id_lock;
 static TidAllocator tid_allocator;
-
-typedef struct {
-    /* app's entry function */
-    wasm_function_inst_t start_func;
-    /* arg of the app's entry function */
-    uint32 arg;
-    /* thread id passed to the app */
-    int32 thread_id;
-} ThreadStartArg;
 
 static int32
 allocate_thread_id()
@@ -46,7 +37,14 @@ deallocate_thread_id(int32 thread_id)
     os_mutex_unlock(&thread_id_lock);
 }
 
-static void *
+void
+restore_thread_id(int32* thread_id, uint32 size) {
+    os_mutex_lock(&thread_id_lock);
+    tid_allocator_restore(&tid_allocator, thread_id, size);
+    os_mutex_unlock(&thread_id_lock);
+}
+
+void *
 thread_start(void *arg)
 {
     wasm_exec_env_t exec_env = (wasm_exec_env_t)arg;
@@ -87,7 +85,7 @@ thread_spawn_wrapper(wasm_exec_env_t exec_env, uint32 start_arg)
     stack_size = ((WASMModuleInstance *)module_inst)->default_wasm_stack_size;
 
     if (!(new_module_inst = wasm_runtime_instantiate_internal(
-              module, module_inst, exec_env, stack_size, 0, 0, NULL, 0)))
+              module, module_inst, exec_env, stack_size, 0, 0, false, NULL, 0)))
         return -1;
 
     wasm_runtime_set_custom_data_internal(
@@ -119,6 +117,7 @@ thread_spawn_wrapper(wasm_exec_env_t exec_env, uint32 start_arg)
     thread_start_arg->arg = start_arg;
     thread_start_arg->start_func = start_func;
 
+    // thread_startはただの関数ネイティブ
     ret = wasm_cluster_create_thread(exec_env, new_module_inst, false, 0, 0,
                                      thread_start, thread_start_arg);
     if (ret != 0) {

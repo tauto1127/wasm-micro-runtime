@@ -41,6 +41,7 @@ wasm_runtime_begin_blocking_op(wasm_exec_env_t env)
 void
 wasm_runtime_end_blocking_op(wasm_exec_env_t env)
 {
+    // printf("wasm_runtime_end_blocking_op: %ld\n", env->handle);
     int saved_errno = errno;
     LOCK(env);
     bh_assert(ISSET(env, BLOCKING));

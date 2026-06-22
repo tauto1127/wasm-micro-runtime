@@ -1,14 +1,35 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <time.h>
 
+#include "platform_api_extension.h"
+#include "platform_api_vmcore.h"
+#include "platform_common.h"
+#include "thread_manager.h"
 #include "../interpreter/wasm_runtime.h"
 #include "wasm_migration.h"
 #include "wasm_dump.h"
 #include "wasm_dispatch.h"
+#include "lib_wasi_threads_wrapper.h"
+
+#if WAMR_BUILD_FUNERA_MIGRATION_SYNC != 0 \
+    && WAMR_BUILD_FUNERA_MIGRATION_BRIDGE != 0 \
+    && WAMR_FUNERA_WASMIG_API_AVAILABLE != 0
+int funera_classic_dump(WASMExecEnv *exec_env, WASMModuleInstance *module,
+                        WASMMemoryInstance *memory, WASMGlobalInstance *globals,
+                        uint8 *global_data, WASMFunctionInstance *cur_func,
+                        struct WASMInterpFrame *frame, uint8 *frame_ip);
+#endif
 
 #define BH_PLATFORM_LINUX 0
-#if WASM_ENABLE_FAST_INTERP == 0
+
+// nopで測定用
+struct timespec startAtNop;
+struct timespec endAtNop;
+
+int* wait_thread_ids = NULL;
+int wait_thread_ids_count = 0;
 
 static char *image_dir = ".";
 void set_image_dir(char* dir)
@@ -33,7 +54,6 @@ FILE* open_image(const char* file, const char* flag) {
         // スラッシュなし → '/' を補って結合
         snprintf(path, sizeof(path), "%s/%s", image_dir, file);
     }
-    snprintf(path, sizeof(path), "%s/%s", image_dir, file);  // パスを構築
 
     FILE *fp = fopen(path, flag);
     if (fp == NULL) {
@@ -43,6 +63,7 @@ FILE* open_image(const char* file, const char* flag) {
     return fp;
 }
 
+#if WASM_ENABLE_FAST_INTERP == 0
 
 
 // #define skip_leb(p) while (*p++ & 0x80)
@@ -70,7 +91,7 @@ int dump_value(void *ptr, size_t size, size_t nmemb, FILE *stream) {
 int debug_memories(WASMModuleInstance *module) {
     printf("=== debug memories ===\n");
     printf("memory_count: %d\n", module->memory_count);
-    
+
     // bytes_per_page
     for (int i = 0; i < module->memory_count; i++) {
         WASMMemoryInstance *memory = (WASMMemoryInstance *)(module->memories[i]);
@@ -110,7 +131,7 @@ int debug_function_opcodes(WASMModuleInstance *module, WASMFunctionInstance* fun
     fprintf(fp, "fidx: %ld\n", func - module->e->functions);
     uint8 *ip = wasm_get_func_code(func);
     uint8 *ip_end = wasm_get_func_code_end(func);
-    
+
     for (int i = 0; i < (int)limit; i++) {
         fprintf(fp, "%d) opcode: 0x%x\n", i+1, *ip);
         ip = dispatch(ip, ip_end);
@@ -150,7 +171,7 @@ uint8* get_type_stack(uint32 fidx, uint32 offset, uint32* type_stack_size, bool 
     if (!tablemap_func) printf("not found tablemap_offset\n");
     FILE *type_table = open_image("type_table", "rb");
     if (!tablemap_func) printf("not found type_table\n");
-    
+
     /// tablemap_func
     fseek(tablemap_func, fidx*sizeof(uint32)*3, SEEK_SET);
     uint32 ffidx;
@@ -173,8 +194,8 @@ uint8* get_type_stack(uint32 fidx, uint32 offset, uint32* type_stack_size, bool 
     uint32 ooffset;
     uint64 type_table_addr, pre_type_table_addr;
     while(!feof(tablemap_offset)) {
-       fread(&ooffset, sizeof(uint32), 1, tablemap_offset); 
-       fread(&type_table_addr, sizeof(uint64), 1, tablemap_offset); 
+       fread(&ooffset, sizeof(uint32), 1, tablemap_offset);
+       fread(&type_table_addr, sizeof(uint64), 1, tablemap_offset);
        if (offset == ooffset) break;
        pre_type_table_addr = type_table_addr;
     }
@@ -247,6 +268,7 @@ _dump_stack(WASMExecEnv *exec_env, struct WASMInterpFrame *frame, FILE *fp, bool
     // 値スタックの中身
     uint32 local_cell_num = func->param_cell_num + func->local_cell_num;
     uint32 value_stack_size = frame->sp - frame->sp_bottom;
+
     fwrite(frame->lp, sizeof(uint32), local_cell_num, fp);
     fwrite(frame->sp_bottom, sizeof(uint32), value_stack_size, fp);
 
@@ -274,7 +296,7 @@ _dump_stack(WASMExecEnv *exec_env, struct WASMInterpFrame *frame, FILE *fp, bool
         // uint32 *frame_tsp;
         // addr = get_addr_offset(csp->frame_tsp, frame->tsp_bottom);
         // fwrite(&addr, sizeof(uint32), 1, fp);
-        
+
         // uint32 cell_num;
         fwrite(&csp->cell_num, sizeof(uint32), 1, fp);
 
@@ -285,31 +307,39 @@ _dump_stack(WASMExecEnv *exec_env, struct WASMInterpFrame *frame, FILE *fp, bool
 
 
 int
-wasm_dump_stack(WASMExecEnv *exec_env, struct WASMInterpFrame *frame)
+wasm_dump_stack(WASMExecEnv *exec_env, struct WASMInterpFrame *frame, char* file_prefix)
 {
     WASMModuleInstance *module =
         (WASMModuleInstance *)exec_env->module_inst;
 
     // frameをtopからbottomまで走査する
-    char file[32];
+    char file_name[MAX_FILE_NAME_LENGTH] = "";
     int i = 0;
     do {
+        // struct timespec startUntilDumpStack, endUntilDumpStack;
+        // clock_gettime(CLOCK_REALTIME, &startUntilDumpStack);
         // dummy framenならbreak
         if (frame->function == NULL) break;
 
         ++i;
-        sprintf(file, "stack%d.img", i);
-        FILE *fp = open_image(file, "wb");
+        sprintf(file_name, "stack%d.img", i);
+        str_add_prefix(file_name, file_prefix);
+        FILE *fp = open_image(file_name, "wb");
 
         uint32 entry_fidx = frame->function - module->e->functions;
         fwrite(&entry_fidx, sizeof(uint32), 1, fp);
 
+        // clock_gettime(CLOCK_REALTIME, &endUntilDumpStack);
+        // printf("Time until dump stack file open: %lu ns\n",
+        //        get_time(startUntilDumpStack, endUntilDumpStack));
         _dump_stack(exec_env, frame, fp, (i==1));
         fclose(fp);
     } while((frame = frame->prev_frame));
 
+    char frame_count_file_name[MAX_FILE_NAME_LENGTH] = "frame_count.img";
+    str_add_prefix(frame_count_file_name, file_prefix);
     // frame stackのサイズを保存
-    FILE *fp = open_image("frame.img", "wb");
+    FILE *fp = open_image(frame_count_file_name, "wb");
     fwrite(&i, sizeof(uint32), 1, fp);
     fclose(fp);
 
@@ -375,15 +405,17 @@ int check_soft_dirty(int fd, uint8* addr) {
 #endif
 }
 
-int dump_dirty_memory(WASMMemoryInstance *memory) {
+int dump_dirty_memory(WASMMemoryInstance *memory, char* file_prefix) {
     const int PAGE_SIZE = 4096;
-    FILE *memory_fp = open_image("memory.img", "wb");
+    char file_name[MAX_FILE_NAME_LENGTH] = "memory.img";
+    str_add_prefix(file_name, file_prefix);
+    FILE *memory_fp = open_image(file_name, "wb");
     uint64 pagemap_entry;
 
 #if BH_PLATFORM_LINUX == 1
     int fd = get_pagemap(memory->memory_data);
 #else
-    // check_soft_dirtyでfdを使っているのでダミー用. 
+    // check_soft_dirtyでfdを使っているのでダミー用.
     // もっといい実装がありそう
     int fd = 0;
 #endif
@@ -406,13 +438,26 @@ int dump_dirty_memory(WASMMemoryInstance *memory) {
     return 0;
 }
 
-int wasm_dump_memory(WASMMemoryInstance *memory) {
-    FILE *mem_size_fp = open_image("mem_page_count.img", "wb");
+void str_add_prefix(char* file_name, char* file_prefix) {
+    size_t len = strlen(file_name) + strlen(file_prefix) + 1;
+    char* buf = malloc(len);
+    if (!buf) return;
 
-    dump_dirty_memory(memory);
+    strcpy(buf, file_prefix);
+    strcat(buf, file_name);
+    strcpy(file_name, buf);
+}
+
+int wasm_dump_memory(WASMMemoryInstance *memory, char* file_prefix) {
+    if(strcmp(file_prefix, MAIN_THREAD_PREFIX) != 0)  return 0;
+    char file_name[MAX_FILE_NAME_LENGTH] = "mem_page_count.img";
+    str_add_prefix(file_name, file_prefix);
+    FILE *mem_size_fp = open_image(file_name, "wb");
+
+    dump_dirty_memory(memory, file_prefix);
 
 
-    printf("page_count: %d\n", memory->cur_page_count);
+    printf("%spage_count: %d\n", file_prefix, memory->cur_page_count);
     fwrite(&(memory->cur_page_count), sizeof(uint32), 1, mem_size_fp);
 
     fclose(mem_size_fp);
@@ -425,12 +470,13 @@ int wasm_dump_memory(WASMMemoryInstance *memory) {
     return 0;
 }
 
-int wasm_dump_global(WASMModuleInstance *module, WASMGlobalInstance *globals, uint8* global_data) {
+int wasm_dump_global(WASMModuleInstance *module, WASMGlobalInstance *globals, uint8* global_data, char* file_prefix) {
     FILE *fp;
-    const char *file = "global.img";
-    fp = open_image(file, "wb");
+    char file_name[MAX_FILE_NAME_LENGTH] = "global.img";
+    str_add_prefix(file_name, file_prefix);
+    fp = open_image(file_name, "wb");
     if (fp == NULL) {
-        fprintf(stderr, "failed to open %s\n", file);
+        fprintf(stderr, "failed to open %s\n", file_name);
         return -1;
     }
 
@@ -461,14 +507,16 @@ int wasm_dump_global(WASMModuleInstance *module, WASMGlobalInstance *globals, ui
 int wasm_dump_program_counter(
     WASMModuleInstance *module,
     WASMFunctionInstance *func,
-    uint8 *frame_ip
+    uint8 *frame_ip,
+    char* file_prefix
 )
 {
     FILE *fp;
-    const char *file = "program_counter.img";
-    fp = open_image(file, "wb");
+    char file_name[MAX_FILE_NAME_LENGTH] = "program_counter.img";
+    str_add_prefix(file_name, file_prefix);
+    fp = open_image(file_name, "wb");
     if (fp == NULL) {
-        fprintf(stderr, "failed to open %s\n", file);
+        fprintf(stderr, "failed to open %s\n", file_name);
         return -1;
     }
 
@@ -480,6 +528,87 @@ int wasm_dump_program_counter(
     dump_value(&p_offset, sizeof(uint32), 1, fp);
 
     return 0;
+}
+
+// thread_id, スレッドの開始関数の引数をdump
+int wasm_dump_thread_states(WASMExecEnv *exec_env, char* file_prefix) {
+    ThreadStartArg *thread_arg = (ThreadStartArg *)exec_env->thread_arg;
+
+    // main thread
+    if (thread_arg == NULL) {
+        printf("main thread dump_thread_states\n");
+        FILE *fp;
+        char file_name[MAX_FILE_NAME_LENGTH] = "thread_state.img";
+        str_add_prefix(file_name, file_prefix);
+        fp = open_image(file_name, "wb");
+        if (fp == NULL) {
+            fprintf(stderr, "failed to open %s\n", file_name);
+            return -1;
+        }
+
+        int16 thread_count = wasm_cluster_get_thread_count(exec_env->cluster);
+        dump_value(&thread_count, sizeof(int16), 1, fp);
+        // // ここでfile_prefix一覧を保存する
+        // WASMExecEnv *exec_env_iter = wasm_cluster_get_first_exec_env(exec_env->cluster);
+        // wasm_cluster_traverse_lock(exec_env);
+        // char* str_to_dump = wasm_runtime_malloc(sizeof(char) * MAX_FILE_NAME_LENGTH);
+        // while (exec_env_iter) {
+        //     ThreadStartArg *arg = (ThreadStartArg *)exec_env_iter->thread_arg;
+        //     int32 tid = (arg == NULL) ? -1 : arg->thread_id;
+        //     char* prefix = get_file_prefix(tid);
+
+        //     if(count == 0) sprintf(str_to_dump, "%s", prefix);
+        //     else sprintf(str_to_dump, ",%s", prefix);
+        //     wasm_runtime_free(prefix);
+
+        //     exec_env_iter = exec_env_iter->next;
+        //     count++;
+        // }
+        int* ids = wasm_cluster_get_thread_ids(exec_env->cluster);
+        int count = 0;
+        for(int *p = ids; *p != -1; ++p) {
+            printf("thread id: %d\n", *p);
+            count++;
+        }
+
+        dump_value(ids, sizeof(int), count, fp);
+        wasm_runtime_free(ids);
+
+        // 待機中スレッド一覧の保存
+        printf("待機中スレッド一覧の保存をdump_valueで行います．数；%d\n", wait_thread_ids_count);
+        dump_value(&wait_thread_ids_count, sizeof(int), 1, fp);
+        dump_value(wait_thread_ids, sizeof(int), wait_thread_ids_count, fp);
+        wasm_runtime_free(wait_thread_ids);
+
+        return 0;
+    }
+
+    //子スレッド
+    FILE *fp;
+    char file_name[MAX_FILE_NAME_LENGTH] = "thread_state.img";
+    str_add_prefix(file_name, file_prefix);
+    fp = open_image(file_name, "wb");
+    if (fp == NULL) {
+        fprintf(stderr, "failed to open %s\n", file_name);
+        return -1;
+    }
+
+    int32 thread_id = thread_arg->thread_id;
+    uint32 arg = thread_arg->arg;
+    dump_value(&thread_id, sizeof(int32), 1, fp);
+    dump_value(&arg, sizeof(uint32), 1, fp);
+
+    return 0;
+}
+// スレッドidから，ファイルprefixを生成．メインスレッドの場合は-1を入れる．
+char* get_file_prefix(int32 thread_id) {
+    if (thread_id == -1) {
+        return MAIN_THREAD_PREFIX;
+    } else {
+        char* prefix = wasm_runtime_malloc(sizeof(char) * MAX_FILE_NAME_LENGTH); \
+        sprintf(prefix, "%d-", thread_id);
+        return prefix;
+    }
 }
 
 int wasm_dump(WASMExecEnv *exec_env,
@@ -498,15 +627,16 @@ int wasm_dump(WASMExecEnv *exec_env,
          uint8 *else_addr,
          uint8 *end_addr,
          uint8 *maddr,
-         bool done_flag)
+         bool done_flag,
+         char* file_prefix)
 {
     int rc;
     struct timespec ts1, ts2;
     // dump linear memory
     clock_gettime(CLOCK_MONOTONIC, &ts1);
-    rc = wasm_dump_memory(memory);
+    rc = wasm_dump_memory(memory, file_prefix);
     clock_gettime(CLOCK_MONOTONIC, &ts2);
-    fprintf(stderr, "memory, %lu\n", get_time(ts1, ts2));
+    fprintf(stderr, "%smemory, %lu\n", file_prefix, get_time(ts1, ts2));
     if (rc < 0) {
         LOG_ERROR("Failed to dump linear memory\n");
         return rc;
@@ -514,9 +644,9 @@ int wasm_dump(WASMExecEnv *exec_env,
 
     // dump globals
     clock_gettime(CLOCK_MONOTONIC, &ts1);
-    rc = wasm_dump_global(module, globals, global_data);
+    rc = wasm_dump_global(module, globals, global_data, file_prefix);
     clock_gettime(CLOCK_MONOTONIC, &ts2);
-    fprintf(stderr, "global, %lu\n", get_time(ts1, ts2));
+    fprintf(stderr, "%sglobal, %lu\n", file_prefix, get_time(ts1, ts2));
     if (rc < 0) {
         LOG_ERROR("Failed to dump globals\n");
         return rc;
@@ -524,9 +654,9 @@ int wasm_dump(WASMExecEnv *exec_env,
 
     // dump program counter
     clock_gettime(CLOCK_MONOTONIC, &ts1);
-    rc = wasm_dump_program_counter(module, cur_func, frame_ip);
+    rc = wasm_dump_program_counter(module, cur_func, frame_ip, file_prefix);
     clock_gettime(CLOCK_MONOTONIC, &ts2);
-    fprintf(stderr, "program counter, %lu\n", get_time(ts1, ts2));
+    fprintf(stderr, "%sprogram counter, %lu\n", file_prefix, get_time(ts1, ts2));
     if (rc < 0) {
         LOG_ERROR("Failed to dump program_counter\n");
         return rc;
@@ -534,13 +664,41 @@ int wasm_dump(WASMExecEnv *exec_env,
 
     // dump stack
     clock_gettime(CLOCK_MONOTONIC, &ts1);
-    rc = wasm_dump_stack(exec_env, frame);
+    rc = wasm_dump_stack(exec_env, frame, file_prefix);
     clock_gettime(CLOCK_MONOTONIC, &ts2);
-    fprintf(stderr, "stack, %lu\n", get_time(ts1, ts2));
+    fprintf(stderr, "%sstack, %lu\n", file_prefix, get_time(ts1, ts2));
     if (rc < 0) {
         LOG_ERROR("Failed to dump frame\n");
         return rc;
     }
+
+    // dump threaed attrs if needed
+    clock_gettime(CLOCK_MONOTONIC, &ts1);
+    rc = wasm_dump_thread_states(exec_env, file_prefix);
+    clock_gettime(CLOCK_MONOTONIC, &ts2);
+    fprintf(stderr, "%sthread attrs, %lu\n", file_prefix, get_time(ts1, ts2));
+    if (rc < 0) {
+        LOG_ERROR("Failed to dump thread attrs\n");
+        return rc;
+    }
+
+#if WAMR_BUILD_FUNERA_MIGRATION_SYNC != 0 \
+    && WAMR_BUILD_FUNERA_MIGRATION_BRIDGE != 0 \
+    && WAMR_FUNERA_WASMIG_API_AVAILABLE != 0
+    /*
+     * Keep legacy per-thread snapshots as the source of truth for
+     * multi-thread restore, and optionally emit funera-format artifacts
+     * from the main thread for migration parity checks.
+     */
+    if (exec_env->thread_arg == NULL) {
+        int mirror_rc =
+            funera_classic_dump(exec_env, module, memory, globals, global_data,
+                                cur_func, frame, frame_ip);
+        if (mirror_rc < 0) {
+            LOG_WARNING("funera mirror dump failed, continue legacy dump path");
+        }
+    }
+#endif
 
     LOG_VERBOSE("Success to dump img for wamr\n");
     return 0;
@@ -552,13 +710,136 @@ static bool sig_flag = false;
 //     wasm_set_checkpoint(true);
 // }
 
-inline 
+inline
 void wasm_set_checkpoint(bool f) {
     sig_flag = f;
 }
 
-inline 
+inline
 bool wasm_get_checkpoint() {
     return sig_flag;
 }
 #endif // WASM_ENABLE_FAST_INTERP
+
+#if WASM_ENABLE_CR != 0
+static void
+checkpoint_routine(WASMCluster *cluster);
+
+void* checkpoint_thread_routine(void* arg) {
+    WASMCluster *cluster = (WASMCluster *)arg; 
+    checkpoint_routine(cluster);
+    return NULL;
+}
+
+void checkpoint_routine(WASMCluster *cluster) {
+    struct timespec startAt, endAt;
+    // dump linear memory
+    // clock_gettime(CLOCK_MONOTONIC, &startAt);
+    int waits = wasm_cluster_get_waiting_thread_count(cluster);
+    int counts = wasm_cluster_get_thread_count(cluster);
+
+    struct AtomicCounter* counter = wasm_cluster_init_checkpointing_counter(cluster,0);
+
+    // printf("=======スレッドの同時停止開始=========\n");
+    // printf("トータルスレッド数：%d, 待機中スレッド数：%d\n", counts, waits);
+    // 停止シグナル
+    wasm_cluster_send_signal_all(cluster, WAMR_SIG_CHECKPOINT);
+    // wasm_cluster_send_signal_all(cluster, WAMR_SIG_CHECKPOINT);
+    os_mutex_lock(&counter->lock);
+    for(;;) {
+        waits = wasm_cluster_get_waiting_thread_count(cluster);
+        counts = wasm_cluster_get_thread_count(cluster);
+
+        if (counter->checkpointing_count + waits == counts) {
+            os_mutex_unlock(&counter->lock);
+            break;
+        }
+
+        os_cond_wait(&counter->cond, &counter->lock);
+        // if (counter->checkpointing_count == 0) {
+        //     os_mutex_unlock(&counter->lock);
+        //     printf("all normal threads wake up!!\n");
+        //     break;
+        // }
+    };
+    os_mutex_unlock(&counter->lock);
+    // printf("======waitしているスレッド一覧をダンプします========\n");
+    wait_thread_ids = wasm_cluster_get_waiting_thread_ids(cluster);
+    wait_thread_ids_count = waits;
+    // printf("done");
+    // if (wait_thread_ids) {
+    //     for (int *p = wait_thread_ids; *p != -2; ++p) {
+    //         printf("waiting thread id: %d\n", *p);
+    //     }
+    // }
+    // printf("======waiting threadを起こします=========\n");
+
+    // =====スレッド同時停止======
+    wasm_cluster_wake_up_threads(cluster);
+    os_mutex_lock(&counter->lock);
+    for(;;) {
+        counts = wasm_cluster_get_thread_count(cluster);
+        if (counter->checkpointing_count == counts) {
+            os_mutex_unlock(&counter->lock);
+            // printf("all waiting threads wake up!! checkpointing count: %d\n", counter->checkpointing_count);
+            break;
+        }
+        os_cond_wait(&counter->cond, &counter->lock);
+    };
+
+    // ========チェックポイント開始========
+    // printf("======start checkpoint========\n");
+    counter = wasm_cluster_init_checkpointing_counter(cluster, 0);
+    wasm_cluster_thread_continue_all(cluster);
+
+    // やっぱちゃんとカウントしないと，全部終わったか分からんな
+    os_mutex_lock(&counter->lock);
+    for(;;) {
+        // if(counter->checkpointing_count != 0) printf("チェックポイント済み：%d\n", counter->checkpointing_count);
+        counts = wasm_cluster_get_thread_count(cluster);
+        if (counter->checkpointing_count == counts) {
+            // printf("========all waiting threads check pointed!! count: %d===========\n", counter->checkpointing_count);
+            os_mutex_unlock(&counter->lock);
+            break;
+        }
+        os_cond_wait(&counter->cond, &counter->lock);
+    };
+    clock_gettime(CLOCK_MONOTONIC, &endAtNop);
+    printf("checkpoint time(nopから): %lu ns\n", get_time(startAtNop, endAtNop));
+    // clock_gettime(CLOCK_MONOTONIC, &endAt);
+    fprintf(stderr, "checkpoint done:%lu\n", get_time(startAt, endAt));
+
+    exit(0);
+}
+
+// checkpoint for thread routine
+void *
+signal_control_routine(void *arg)
+{
+    // チェックポイント用スレッドの処理
+    WASMCluster *cluster = (WASMCluster *)arg;
+    sigset_t set;
+    int sig;
+
+    sigemptyset(&set);
+    sigaddset(&set, SIGUSR1);
+    sigaddset(&set, SIGUSR2);
+
+    while (true) {
+        if (sigwait(&set, &sig) != 0) {
+            continue;
+        }
+        // チェックポイントシグナルが届いた時
+        if (sig == SIGUSR2) {
+            checkpoint_routine(cluster);   
+            // wasm_cluster_reset_checkpointing_counter(cluster);
+        }
+        else if (sig == SIGUSR1) {
+            printf("SIGUSR1 called, %ld", pthread_self());
+            wasm_cluster_thread_continue_all(cluster);
+        }
+    }
+
+    return NULL;
+}
+#endif /* WASM_ENABLE_CR != 0 */

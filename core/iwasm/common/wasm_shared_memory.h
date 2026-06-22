@@ -22,6 +22,9 @@ wasm_shared_memory_init();
 void
 wasm_shared_memory_destroy();
 
+HashMap *
+get_wait_map(void);
+
 uint16
 shared_memory_inc_reference(WASMMemoryInstance *memory);
 
@@ -55,6 +58,18 @@ wasm_runtime_atomic_wait(WASMModuleInstanceCommon *module, void *address,
 uint32
 wasm_runtime_atomic_notify(WASMModuleInstanceCommon *module, void *address,
                            uint32 count);
+
+#if WASM_ENABLE_THREAD_MGR != 0
+uint32
+wasm_shared_memory_get_waiters_count(void);
+/* Wake all waiters (atomic.wait) and return number signaled */
+uint32
+wasm_shared_memory_wake_waiters(void);
+// wait_mapを取得するための関数
+int get_wait_node_count();
+int *get_wait_node_tids(void);
+int *get_wait_node_ids(void);
+#endif
 
 #ifdef __cplusplus
 }
