@@ -777,11 +777,13 @@ wasm_cluster_create_thread(WASMExecEnv *exec_env,
     new_exec_env->suspend_flags.flags =
         (exec_env->suspend_flags.flags & WASM_SUSPEND_FLAG_INHERIT_MASK);
 
-    /* もし親execenvがWAMR_RESTOREシグナルを持つなら，それを継承する */
+#if WASM_ENABLE_DEBUG_INTERP != 0 || WASM_ENABLE_CR != 0
+    /* Inherit restore signal state when debug/C-R signal handling is enabled. */
     if (wasm_cluster_get_thread_signal(exec_env) == WAMR_SIG_RESTORE) {
         BH_ATOMIC_32_STORE(new_exec_env->current_status->signal_flag,
                            WAMR_SIG_RESTORE);
     }
+#endif
 
     if (!wasm_cluster_add_exec_env(cluster, new_exec_env))
         goto fail2;

@@ -13,8 +13,16 @@
 #include "wasm_dispatch.h"
 #include "lib_wasi_threads_wrapper.h"
 
+#if WAMR_BUILD_FUNERA_MIGRATION_SYNC != 0 \
+    && WAMR_BUILD_FUNERA_MIGRATION_BRIDGE != 0 \
+    && WAMR_FUNERA_WASMIG_API_AVAILABLE != 0
+int funera_classic_dump(WASMExecEnv *exec_env, WASMModuleInstance *module,
+                        WASMMemoryInstance *memory, WASMGlobalInstance *globals,
+                        uint8 *global_data, WASMFunctionInstance *cur_func,
+                        struct WASMInterpFrame *frame, uint8 *frame_ip);
+#endif
+
 #define BH_PLATFORM_LINUX 0
-#if WASM_ENABLE_FAST_INTERP == 0
 
 // nopで測定用
 struct timespec startAtNop;
@@ -46,7 +54,6 @@ FILE* open_image(const char* file, const char* flag) {
         // スラッシュなし → '/' を補って結合
         snprintf(path, sizeof(path), "%s/%s", image_dir, file);
     }
-    snprintf(path, sizeof(path), "%s/%s", image_dir, file);  // パスを構築
 
     FILE *fp = fopen(path, flag);
     if (fp == NULL) {
@@ -56,6 +63,7 @@ FILE* open_image(const char* file, const char* flag) {
     return fp;
 }
 
+#if WASM_ENABLE_FAST_INTERP == 0
 
 
 // #define skip_leb(p) while (*p++ & 0x80)
@@ -674,6 +682,24 @@ int wasm_dump(WASMExecEnv *exec_env,
         return rc;
     }
 
+#if WAMR_BUILD_FUNERA_MIGRATION_SYNC != 0 \
+    && WAMR_BUILD_FUNERA_MIGRATION_BRIDGE != 0 \
+    && WAMR_FUNERA_WASMIG_API_AVAILABLE != 0
+    /*
+     * Keep legacy per-thread snapshots as the source of truth for
+     * multi-thread restore, and optionally emit funera-format artifacts
+     * from the main thread for migration parity checks.
+     */
+    if (exec_env->thread_arg == NULL) {
+        int mirror_rc =
+            funera_classic_dump(exec_env, module, memory, globals, global_data,
+                                cur_func, frame, frame_ip);
+        if (mirror_rc < 0) {
+            LOG_WARNING("funera mirror dump failed, continue legacy dump path");
+        }
+    }
+#endif
+
     LOG_VERBOSE("Success to dump img for wamr\n");
     return 0;
 }
@@ -694,13 +720,17 @@ bool wasm_get_checkpoint() {
     return sig_flag;
 }
 #endif // WASM_ENABLE_FAST_INTERP
-       // 
+
+#if WASM_ENABLE_CR != 0
+static void
+checkpoint_routine(WASMCluster *cluster);
+
 void* checkpoint_thread_routine(void* arg) {
     WASMCluster *cluster = (WASMCluster *)arg; 
     checkpoint_routine(cluster);
     return NULL;
 }
-       
+
 void checkpoint_routine(WASMCluster *cluster) {
     struct timespec startAt, endAt;
     // dump linear memory
@@ -812,3 +842,4 @@ signal_control_routine(void *arg)
 
     return NULL;
 }
+#endif /* WASM_ENABLE_CR != 0 */
