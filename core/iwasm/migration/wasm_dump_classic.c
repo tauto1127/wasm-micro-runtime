@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <time.h>
 #include <wasmig/migration.h>
 #include <wasmig/stack_tables.h>
@@ -13,6 +14,7 @@
 #include "wasm_dump.h"
 #include "wasm_dispatch.h"
 #include "wasm_migration_helper.h"
+#include "wasm_thread_migration.h"
 
 // #define skip_leb(p) while (*p++ & 0x80)
 #define skip_leb(p)    \
@@ -271,6 +273,12 @@ wasm_dump_stack(WASMExecEnv *exec_env, struct WASMInterpFrame *frame,
 int
 wasm_dump_memory(WASMMemoryInstance *memory, const char *file_prefix)
 {
+    /* 共有線形メモリはメインスレッドのみダンプする（v1: wasm_dump.c 参照）。
+     * workerスレッドは同じ共有メモリを指すため、prefix付きで重複して
+     * 全量ダンプすると「スレッド数 × 線形メモリサイズ」に肥大化する。
+     * 単一スレッド時は file_prefix == NULL（= main 相当）。 */
+    if (file_prefix != NULL && strcmp(file_prefix, MAIN_THREAD_PREFIX) != 0)
+        return 0;
     int page_size_rate = memory->num_bytes_per_page / WASM_PAGE_SIZE;
     return wasmig_checkpoint_memory_with_prefix(
         memory->memory_data, memory->cur_page_count * page_size_rate,

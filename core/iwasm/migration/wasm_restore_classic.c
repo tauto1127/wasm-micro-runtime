@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "../common/wasm_exec_env.h"
 #include "../common/wasm_memory.h"
@@ -434,11 +435,17 @@ int wasm_restore(WASMModuleInstance **module,
 {
     struct timespec ts1, ts2;
     // restore memory
-    clock_gettime(CLOCK_MONOTONIC, &ts1);
-    wasm_restore_memory(*module, memory, maddr, file_prefix);
-    clock_gettime(CLOCK_MONOTONIC, &ts2);
-    fprintf(stderr, "memory, %lu\n", get_time(ts1, ts2));
-    // printf("Success to restore linear memory\n");
+    // 共有線形メモリはメインスレッドのみ復元する（v1: wasm_restore.c 参照）。
+    // workerは同じ共有メモリを共有し、ダンプ側もmainのみが書くため、
+    // <tid>-memory.img は存在しない。バリアでmainの復元完了後に再開する。
+    // 単一スレッド時は file_prefix == NULL（= main 相当）。
+    if (file_prefix == NULL || strcmp(file_prefix, MAIN_THREAD_PREFIX) == 0) {
+        clock_gettime(CLOCK_MONOTONIC, &ts1);
+        wasm_restore_memory(*module, memory, maddr, file_prefix);
+        clock_gettime(CLOCK_MONOTONIC, &ts2);
+        fprintf(stderr, "memory, %lu\n", get_time(ts1, ts2));
+        // printf("Success to restore linear memory\n");
+    }
 
     // restore globals
     clock_gettime(CLOCK_MONOTONIC, &ts1);

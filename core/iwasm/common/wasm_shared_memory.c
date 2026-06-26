@@ -321,6 +321,11 @@ wasm_runtime_atomic_wait(WASMModuleInstanceCommon *module, void *address,
     }
 
     wait_node->status = S_WAITING;
+#if WASM_ENABLE_THREAD_MGR != 0
+    /* remember the exec env so the wait_map can be walked at checkpoint time
+       to collect the thread ids of waiting threads (CR) */
+    wait_node->exec_env = exec_env;
+#endif
 
     /* Acquire the wait info, create new one if not exists */
     wait_info = acquire_wait_info(address, wait_node);
@@ -337,12 +342,25 @@ wasm_runtime_atomic_wait(WASMModuleInstanceCommon *module, void *address,
     timeout_left = (uint64)timeout / 1000;
     timeout_1sec = (uint64)1e6;
 
+    /* Set when the wait is interrupted because a checkpoint signal arrived
+       (CR). In that case we return 3 so the interpreter re-pushes the wait
+       operands and re-executes the atomic.wait after restore (v1 design). */
+    bool is_checkpoint = false;
+
     while (1) {
         if (timeout < 0) {
             /* wait forever until it is notified or terminatied
                here we keep waiting and checking every second */
             os_cond_reltimedwait(&wait_node->wait_cond, lock,
                                  (uint64)timeout_1sec);
+#if WASM_ENABLE_THREAD_MGR != 0
+            /* checkpoint requested while waiting */
+            if (IS_WAMR_CHECKPOINT_SIG(
+                    wasm_cluster_get_thread_signal(exec_env))) {
+                is_checkpoint = true;
+                break;
+            }
+#endif
             if (wait_node->status == S_NOTIFIED /* notified by atomic.notify */
 #if WASM_ENABLE_THREAD_MGR != 0
                 /* terminated by other thread */
@@ -356,6 +374,14 @@ wasm_runtime_atomic_wait(WASMModuleInstanceCommon *module, void *address,
             timeout_wait =
                 timeout_left < timeout_1sec ? timeout_left : timeout_1sec;
             os_cond_reltimedwait(&wait_node->wait_cond, lock, timeout_wait);
+#if WASM_ENABLE_THREAD_MGR != 0
+            /* checkpoint requested while waiting */
+            if (IS_WAMR_CHECKPOINT_SIG(
+                    wasm_cluster_get_thread_signal(exec_env))) {
+                is_checkpoint = true;
+                break;
+            }
+#endif
             if (wait_node->status == S_NOTIFIED /* notified by atomic.notify */
                 || timeout_left <= timeout_wait /* time out */
 #if WASM_ENABLE_THREAD_MGR != 0
@@ -384,6 +410,11 @@ wasm_runtime_atomic_wait(WASMModuleInstanceCommon *module, void *address,
     map_try_release_wait_info(wait_map, wait_info, address);
 
     os_mutex_unlock(lock);
+
+    if (is_checkpoint) {
+        /* interrupted by a checkpoint signal (CR) */
+        return 3;
+    }
 
     return is_timeout ? 2 : 0;
 }

@@ -1326,6 +1326,156 @@ wasm_interp_sigint(int signum)
     sig_flag = true;
 }
 
+#if WASM_ENABLE_THREAD_MGR != 0
+/* ===== CR: waiter-first restore orchestration (ported from v1) =====
+   At restore, waiting threads must re-enter their atomic.wait BEFORE any
+   normal thread resumes, otherwise a normal thread could run an atomic.notify
+   before the waiter is reconstructed and the notify would be lost. The main
+   thread spawns restore_sync_routine, which wakes the waiting threads one by
+   one (so each re-executes its wait and re-parks), and only then resumes the
+   normal threads. */
+typedef struct RestoreSyncArgs {
+    int waiting_thread_count;
+    int *waiting_thread_ids;
+    WASMExecEnv *main_exec_env;
+} RestoreSyncArgs;
+
+static WASMExecEnv *
+find_exec_env_by_thread_id(WASMCluster *cluster, int thread_id)
+{
+    WASMExecEnv *env = NULL;
+
+    os_mutex_lock(&cluster->lock);
+    env = bh_list_first_elem(&cluster->exec_env_list);
+    while (env) {
+        ThreadStartArg *arg = (ThreadStartArg *)env->thread_arg;
+        if ((thread_id == -1 && arg == NULL)
+            || (arg && arg->thread_id == thread_id)) {
+            os_mutex_unlock(&cluster->lock);
+            return env;
+        }
+        env = bh_list_elem_next(env);
+    }
+    os_mutex_unlock(&cluster->lock);
+
+    return NULL;
+}
+
+static void
+wait_for_waiter_count(WASMCluster *cluster, int expected_count)
+{
+    while (wasm_cluster_get_waiting_thread_count(cluster) < expected_count) {
+        usleep(10);
+    }
+}
+
+static bool
+tid_in_list(int tid, const int *ids, int count)
+{
+    for (int i = 0; i < count; i++) {
+        if (ids[i] == tid) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* A thread that was woken to re-execute its atomic.wait stays in RUNNING
+   state (it blocks inside wasm_runtime_atomic_wait, not via waiting_run), so we
+   cannot require waiters to be STATUS_STOP. We only need the NON-waiter child
+   threads to be parked (STOP) before resuming everyone together; the waiters
+   have already been confirmed back in the wait list via wait_for_waiter_count. */
+static bool
+nonwaiters_all_stopped(WASMCluster *cluster, const int *waiting_ids,
+                       int waiting_count)
+{
+    bool all_stopped = true;
+
+    os_mutex_lock(&cluster->lock);
+    WASMExecEnv *env = bh_list_first_elem(&cluster->exec_env_list);
+    while (env) {
+        ThreadStartArg *arg = (ThreadStartArg *)env->thread_arg;
+        if (arg
+            && !tid_in_list(arg->thread_id, waiting_ids, waiting_count)
+            && env->current_status->running_status != STATUS_STOP) {
+            all_stopped = false;
+            break;
+        }
+        env = bh_list_elem_next(env);
+    }
+    os_mutex_unlock(&cluster->lock);
+
+    return all_stopped;
+}
+
+static void
+wait_for_nonwaiters_stopped(WASMCluster *cluster, const int *waiting_ids,
+                            int waiting_count)
+{
+    while (!nonwaiters_all_stopped(cluster, waiting_ids, waiting_count)) {
+        usleep(10);
+    }
+}
+
+static void *
+restore_sync_routine(void *arg)
+{
+    RestoreSyncArgs *args = (RestoreSyncArgs *)arg;
+    WASMExecEnv *main_exec_env = args->main_exec_env;
+    WASMCluster *cluster = main_exec_env->cluster;
+    int waiting_thread_count = args->waiting_thread_count;
+    int *waiting_thread_ids = args->waiting_thread_ids;
+
+    /* wait until the main thread has parked itself */
+    while (main_exec_env->current_status->running_status != STATUS_STOP) {
+        usleep(10);
+    }
+
+    if (waiting_thread_count > 0 && !waiting_thread_ids) {
+        printf("waiting_thread_ids is NULL with count=%d\n",
+               waiting_thread_count);
+        wasm_cluster_thread_continue_all(cluster);
+        wasm_runtime_free(args);
+        return NULL;
+    }
+
+    /* Wake the waiting threads one at a time so each re-executes its
+       atomic.wait and re-enters the wait list before the next one is woken.
+       The wait list uses LIFO insertion, so wake in reverse to reconstruct the
+       order. We confirm EVERY waiter (including the last) actually re-entered
+       the wait list, so the wait state is fully reconstructed. */
+    int confirmed_waiters = wasm_cluster_get_waiting_thread_count(cluster);
+    for (int i = waiting_thread_count - 1; i >= 0; i--) {
+        int tid = waiting_thread_ids[i];
+        WASMExecEnv *target_env = find_exec_env_by_thread_id(cluster, tid);
+
+        if (!target_env) {
+            printf("waiting thread id %d not found\n", tid);
+            continue;
+        }
+
+        wasm_cluster_thread_continue(target_env);
+
+        /* wait until this thread has actually re-entered atomic.wait */
+        confirmed_waiters++;
+        wait_for_waiter_count(cluster, confirmed_waiters);
+    }
+
+    /* the non-waiter children must be parked before we resume everyone
+       together (the waiters are already back in their wait) */
+    wait_for_nonwaiters_stopped(cluster, waiting_thread_ids,
+                                waiting_thread_count);
+
+    wasm_cluster_thread_continue_all(cluster);
+
+    if (args->waiting_thread_ids) {
+        wasm_runtime_free(args->waiting_thread_ids);
+    }
+    wasm_runtime_free(args);
+    return NULL;
+}
+#endif /* WASM_ENABLE_THREAD_MGR != 0 */
+
 static void
 wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                                WASMExecEnv *exec_env,
@@ -1412,6 +1562,11 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
         ThreadStartArg *restore_thread_arg =
             (ThreadStartArg *)exec_env->thread_arg;
         char *file_prefix;
+        /* list of thread ids that were blocked in atomic.wait at checkpoint
+           time; only the main thread reads it (from main-thread_state.img) and
+           hands it to restore_sync_routine for waiter-first resume. */
+        int waiting_thread_count = 0;
+        int *waiting_thread_ids = NULL;
 
         if (restore_thread_arg == NULL
             && wasm_cluster_get_thread_signal(exec_env) != WAMR_SIG_RESTORE) {
@@ -1432,6 +1587,16 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                     wasm_runtime_malloc((uint32)(sizeof(int) * (to_read + 1)));
                 fread(thread_ids, sizeof(int), to_read, ts_fp);
                 thread_ids[to_read] = -1;
+
+                /* the waiting-thread list follows the thread ids in the image
+                   (see wasm_dump_thread_states) */
+                fread(&waiting_thread_count, sizeof(int), 1, ts_fp);
+                if (waiting_thread_count > 0) {
+                    waiting_thread_ids = wasm_runtime_malloc(
+                        (uint32)(sizeof(int) * waiting_thread_count));
+                    fread(waiting_thread_ids, sizeof(int), waiting_thread_count,
+                          ts_fp);
+                }
                 fclose(ts_fp);
 
                 restore_thread_id(thread_ids, (uint32)to_read);
@@ -1517,6 +1682,45 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
             }
         }
         set_restore_flag(false);
+
+        // ===== waiter-first resume (CR, ported from v1) =====
+        // The barrier above guarantees every thread has finished restoring.
+        // Now resume so that threads which were blocked in atomic.wait at
+        // checkpoint time re-enter their wait BEFORE any normal thread runs
+        // (otherwise a normal thread could atomic.notify before the waiter is
+        // reconstructed and the notify would be lost).
+#if WASM_ENABLE_THREAD_MGR != 0
+        if (restore_thread_arg == NULL) {
+            // main thread spawns the synchronization helper, then parks
+            RestoreSyncArgs *sync_args =
+                wasm_runtime_malloc(sizeof(RestoreSyncArgs));
+            if (sync_args == NULL) {
+                perror("Failed to allocate RestoreSyncArgs");
+                return;
+            }
+            sync_args->main_exec_env = exec_env;
+            sync_args->waiting_thread_count = waiting_thread_count;
+            sync_args->waiting_thread_ids = waiting_thread_ids;
+
+            korp_thread sync_thread_id;
+            if (os_thread_create(&sync_thread_id, restore_sync_routine,
+                                 sync_args, APP_THREAD_STACK_SIZE_DEFAULT)
+                != 0) {
+                perror("Failed to create restore sync thread");
+                wasm_runtime_free(sync_args);
+                return;
+            }
+        }
+
+        // every thread parks here; restore_sync_routine wakes the threads that
+        // were blocked in atomic.wait first (their restored pc is at the wait
+        // opcode, so normal dispatch below re-executes the wait and re-enters
+        // the wait list), then resumes the rest. This guarantees a waiter is
+        // back in its wait before any normal thread can atomic.notify.
+        os_mutex_lock(&exec_env->wait_lock);
+        wasm_cluster_thread_waiting_run(exec_env);
+        os_mutex_unlock(&exec_env->wait_lock);
+#endif /* WASM_ENABLE_THREAD_MGR != 0 */
 
         // checkpoint after restoring the Wasm state for debugging
         char *is_checkpoint_after_restore = getenv("CHECKPOINT_AFTER_RESTORE");
@@ -3784,6 +3988,11 @@ migration_async:
             HANDLE_OP(WASM_OP_ATOMIC_PREFIX)
             {
                 uint32 offset = 0, align, addr;
+                /* start of this atomic instruction (the prefix byte was already
+                   consumed by the dispatch). Used by CR to rewind the pc when a
+                   thread is checkpointed while blocked in atomic.wait, so it
+                   re-executes the wait on restore. */
+                uint8 *atomic_op_start = frame_ip - 1;
 
                 opcode = *frame_ip++;
 
@@ -3829,6 +4038,21 @@ migration_async:
                             goto got_exception;
 
 #if WASM_ENABLE_THREAD_MGR != 0
+                        /* interrupted by a checkpoint signal (CR): rewind to the
+                           wait opcode and push the operands back so the dumped
+                           state is exactly "about to execute the wait". On
+                           restore the thread re-executes the wait naturally via
+                           normal dispatch, re-entering its wait. This keeps the
+                           dumped state at a real instruction boundary, which is
+                           required by the static stack metadata used to
+                           dump/restore the operand stack. */
+                        if (ret == 3) {
+                            PUSH_I32(addr);
+                            PUSH_I32(expect);
+                            PUSH_I64(timeout);
+                            frame_ip = atomic_op_start;
+                            DO_CHECKPOINT();
+                        }
                         CHECK_SUSPEND_FLAGS();
 #endif
 
@@ -3853,6 +4077,14 @@ migration_async:
                             goto got_exception;
 
 #if WASM_ENABLE_THREAD_MGR != 0
+                        /* interrupted by a checkpoint signal (see WAIT32) */
+                        if (ret == 3) {
+                            PUSH_I32(addr);
+                            PUSH_I64(expect);
+                            PUSH_I64(timeout);
+                            frame_ip = atomic_op_start;
+                            DO_CHECKPOINT();
+                        }
                         CHECK_SUSPEND_FLAGS();
 #endif
 
