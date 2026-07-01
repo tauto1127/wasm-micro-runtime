@@ -1269,18 +1269,18 @@ multi_thread_checkpoint_init(WASMCluster *cluster)
         return;
     }
 
-    printf("11\n");
+    fprintf(stderr, "11 stderr\n");
     /* Block signals in this thread; handler thread will consume via sigwait */
     sigemptyset(&set);
     sigaddset(&set, SIGUSR1);
     sigaddset(&set, SIGUSR2);
     pthread_sigmask(SIG_BLOCK, &set, NULL);
-    printf("22\n");
+    fprintf(stderr, "22 stderr\n");
 
     if (os_thread_create(&signal_control_tid, signal_control_routine, cluster,
                          APP_THREAD_STACK_SIZE_DEFAULT)
         == 0) {
-        printf("signal init: %lu\n", signal_control_tid);
+        fprintf(stderr, "signal init: %lu\n", signal_control_tid);
         signal_control_started = true;
     }
 }
@@ -1295,7 +1295,7 @@ multi_thread_checkpoint_init(WASMCluster *cluster)
 #else
 #define INIT_CHECKPOINT() /*こっちがマルチ*/             \
     do {                                                 \
-        printf("initします\n");                          \
+        fprintf(stderr, "initします\n");                 \
         multi_thread_checkpoint_init(exec_env->cluster); \
     } while (0)
 #endif

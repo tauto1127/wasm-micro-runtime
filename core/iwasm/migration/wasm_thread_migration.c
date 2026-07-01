@@ -6,6 +6,7 @@
 #include "wasm_runtime_common.h"
 #include "wasm_native.h"
 #include "bh_log.h"
+#include <errno.h>
 
 int *wait_thread_ids = NULL;
 int wait_thread_ids_count = 0;
@@ -23,9 +24,13 @@ checkpoint_routine(WASMCluster *cluster)
     struct AtomicCounter *counter =
         wasm_cluster_init_checkpointing_counter(cluster, 0);
 
-    printf("=======スレッドの同時停止開始=========\n");
+    fprintf(stderr, "=======スレッドの同時停止開始=========\n");
     // 停止シグナル
     wasm_cluster_send_signal_all(cluster, WAMR_SIG_CHECKPOINT);
+    // recv 等でブロック中のスレッドを（終了させずに）起こし、interp ループへ
+    // 戻して WAMR_SIG_CHECKPOINT を観測させる。これをしないと下の Phase 2 の
+    // 待ちが永久にブロックする。
+    wasm_cluster_wakeup_blocking_threads_for_checkpoint(cluster);
 
     // for (;;) {
     //     os_mutex_unlock(&counter->lock);
@@ -96,7 +101,7 @@ checkpoint_routine(WASMCluster *cluster)
 void *
 signal_control_routine(void *arg)
 {
-    printf("3\n");
+    fprintf(stderr, "3 stderr\n");
     // チェックポイント用スレッドの処理
     WASMCluster *cluster = (WASMCluster *)arg;
     sigset_t set;
@@ -108,16 +113,17 @@ signal_control_routine(void *arg)
 
     while (true) {
         if (sigwait(&set, &sig) != 0) {
+            fprintf(stderr, "sigwait failed: %d\n", errno);
             continue;
         }
         // チェックポイントシグナルが届いた時
         if (sig == SIGUSR2) {
             // 戻す
-            printf("SIGUSR2 called, %ld\n", pthread_self());
+            fprintf(stderr, "SIGUSR2 called, %ld\n", pthread_self());
             checkpoint_routine(cluster);
         }
         else if (sig == SIGUSR1) {
-            printf("SIGUSR1 called, %ld", pthread_self());
+            fprintf(stderr, "SIGUSR1 called, %ld\n", pthread_self());
             // wasm_cluster_thread_continue_all(cluster);
         }
     }

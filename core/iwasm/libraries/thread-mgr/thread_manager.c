@@ -962,6 +962,42 @@ wasm_cluster_send_signal_all(WASMCluster *cluster, uint32 signo)
 }
 
 void
+wasm_cluster_wakeup_blocking_threads_for_checkpoint(WASMCluster *cluster)
+{
+    WASMExecEnv **targets;
+    uint32 n, count = 0, i;
+
+    if (!cluster)
+        return;
+
+    /* Snapshot the exec_envs currently blocked in a syscall (e.g.
+       sock_recv_from) under cluster->lock, then wake them outside the lock
+       since the wake loop sleeps. Waking them (WITHOUT terminating) makes the
+       blocking syscall return EINTR so they re-enter the interp loop and
+       observe the already-set WAMR_SIG_CHECKPOINT at CHECK_DUMP; otherwise
+       checkpoint_routine hangs waiting for them to checkpoint. */
+    os_mutex_lock(&cluster->lock);
+    n = cluster->exec_env_list.len;
+    targets = wasm_runtime_malloc(sizeof(WASMExecEnv *) * (n ? n : 1));
+    if (targets) {
+        WASMExecEnv *env = bh_list_first_elem(&cluster->exec_env_list);
+        while (env) {
+            if (WASM_SUSPEND_FLAGS_GET(env->suspend_flags)
+                & WASM_SUSPEND_FLAG_BLOCKING)
+                targets[count++] = env;
+            env = bh_list_elem_next(env);
+        }
+    }
+    os_mutex_unlock(&cluster->lock);
+
+    if (!targets)
+        return;
+    for (i = 0; i < count; i++)
+        wasm_runtime_wakeup_blocking_op_for_checkpoint(targets[i]);
+    wasm_runtime_free(targets);
+}
+
+void
 wasm_cluster_thread_exited(WASMExecEnv *exec_env)
 {
     exec_env->current_status->running_status = STATUS_EXIT;

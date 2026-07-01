@@ -222,6 +222,12 @@ wasm_cluster_destroy_exenv_status(WASMCurrentEnvStatus *status);
 void
 wasm_cluster_send_signal_all(WASMCluster *cluster, uint32 signo);
 
+/* Wake all threads currently blocked in a syscall so they return to the interp
+   loop and observe a pending checkpoint signal. Call right after
+   wasm_cluster_send_signal_all(cluster, WAMR_SIG_CHECKPOINT). */
+void
+wasm_cluster_wakeup_blocking_threads_for_checkpoint(WASMCluster *cluster);
+
 void
 wasm_cluster_thread_continue_all(WASMCluster *cluster);
 

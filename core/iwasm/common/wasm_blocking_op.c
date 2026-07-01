@@ -77,6 +77,31 @@ wasm_runtime_interrupt_blocking_op(wasm_exec_env_t env)
     UNLOCK(env);
 }
 
+void
+wasm_runtime_wakeup_blocking_op_for_checkpoint(wasm_exec_env_t env)
+{
+    /*
+     * Same wake-up loop as wasm_runtime_interrupt_blocking_op, but WITHOUT
+     * setting the TERMINATE flag. We only want to bump a thread out of its
+     * blocking syscall (e.g. sock_recv_from) so it returns to the interpreter
+     * loop and observes the pending checkpoint signal (WAMR_SIG_CHECKPOINT) at
+     * CHECK_DUMP. The thread must keep running to be checkpointed, not exit.
+     *
+     * The signal makes the syscall return EINTR; the guest's own recv loop
+     * treats that as a transient error and retries, so no pc rewind is needed.
+     */
+    LOCK(env);
+    while (ISSET(env, BLOCKING)) {
+        UNLOCK(env);
+        os_wakeup_blocking_op(env->handle);
+
+        /* relax a bit */
+        os_usleep(50 * 1000);
+        LOCK(env);
+    }
+    UNLOCK(env);
+}
+
 #else /* WASM_ENABLE_THREAD_MGR && OS_ENABLE_WAKEUP_BLOCKING_OP */
 
 bool
@@ -87,6 +112,10 @@ wasm_runtime_begin_blocking_op(wasm_exec_env_t env)
 
 void
 wasm_runtime_end_blocking_op(wasm_exec_env_t env)
+{}
+
+void
+wasm_runtime_wakeup_blocking_op_for_checkpoint(wasm_exec_env_t env)
 {}
 
 #endif /* WASM_ENABLE_THREAD_MGR && OS_ENABLE_WAKEUP_BLOCKING_OP */

@@ -1116,6 +1116,12 @@ wasm_runtime_end_blocking_op(WASMExecEnv *exec_env);
 void
 wasm_runtime_interrupt_blocking_op(WASMExecEnv *exec_env);
 
+/* Wake a thread out of a blocking syscall for checkpointing WITHOUT
+   terminating it, so it returns to the interp loop and observes the pending
+   WAMR_SIG_CHECKPOINT at CHECK_DUMP. */
+void
+wasm_runtime_wakeup_blocking_op_for_checkpoint(WASMExecEnv *exec_env);
+
 #if WASM_ENABLE_LINUX_PERF != 0
 bool
 wasm_runtime_get_linux_perf(void);
