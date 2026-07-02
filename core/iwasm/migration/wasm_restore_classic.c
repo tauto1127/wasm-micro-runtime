@@ -7,6 +7,8 @@
 #include "../interpreter/wasm_runtime.h"
 #include "wasm_migration.h"
 #include "wasm_restore.h"
+#include "wasm_socket_journal.h"
+
 #include "wasm_migration_helper.h"
 #include "wasm_thread_migration.h"
 #include <wasmig/migration.h>
@@ -445,6 +447,7 @@ int wasm_restore(WASMModuleInstance **module,
         clock_gettime(CLOCK_MONOTONIC, &ts2);
         fprintf(stderr, "memory, %lu\n", get_time(ts1, ts2));
         // printf("Success to restore linear memory\n");
+        socket_journal_restore(*exec_env, file_prefix);
     }
 
     // restore globals

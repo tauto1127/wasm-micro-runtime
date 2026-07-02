@@ -3359,3 +3359,32 @@ wasmtime_ssp_sock_get_ip_multicast_loop(wasm_exec_env_t exec_env,
 
     return __WASI_ESUCCESS;
 }
+
+__wasi_errno_t
+wasi_ssp_sock_restore_open(wasm_exec_env_t exec_env, struct fd_table *curfds,
+                           __wasi_fd_t target_fd, int af, int socktype)
+{
+    bh_socket_t sock;
+    bool is_ipv4 = (af != INET6), is_tcp = (socktype != SOCKET_DGRAM);
+    struct fd_object *stale = NULL;
+
+    /* If target_fd is already occupied (e.g. divergent restore args, or a
+     * socket whose close was not journalled), release the stale descriptor
+     * first so fd_table_attach's "slot must be empty" invariant holds instead
+     * of aborting (debug) or leaking and corrupting ft->used (release). */
+    rwlock_wrlock(&curfds->lock);
+    if (target_fd < curfds->size && curfds->entries[target_fd].object != NULL)
+        fd_table_detach(curfds, target_fd, &stale);
+    rwlock_unlock(&curfds->lock);
+    if (stale != NULL)
+        fd_object_release(exec_env, stale);
+
+    if (os_socket_create(&sock, is_ipv4, is_tcp) != BHT_OK)
+        return convert_errno(errno);
+    if (!fd_table_insert_existing(curfds, target_fd, sock, false)) {
+        os_socket_close(sock);
+        return __WASI_EMFILE;
+    }
+    return __WASI_ESUCCESS;
+}
+

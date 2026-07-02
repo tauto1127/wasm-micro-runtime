@@ -8,6 +8,8 @@
 #include "wasm_export.h"
 #include "wasm_runtime_common.h"
 #include "wasmtime_ssp.h"
+#include "wasm_socket_journal.h"
+
 
 #if WASM_ENABLE_THREAD_MGR != 0
 #include "../../../thread-mgr/thread_manager.h"
@@ -333,10 +335,21 @@ wasi_fd_close(wasm_exec_env_t exec_env, wasi_fd_t fd)
     struct fd_table *curfds = wasi_ctx_get_curfds(module_inst, wasi_ctx);
     struct fd_prestats *prestats = wasi_ctx_get_prestats(module_inst, wasi_ctx);
 
+    wasi_errno_t ret;
     if (!wasi_ctx)
         return (wasi_errno_t)-1;
 
-    return wasmtime_ssp_fd_close(exec_env, curfds, prestats, fd);
+    ret = wasmtime_ssp_fd_close(exec_env, curfds, prestats, fd);
+    /* Only journal the close of fds we actually opened as sockets, so file
+     * closes don't bloat the journal or shadow a reused fd number. */
+    if (ret == __WASI_ESUCCESS && socket_journal_has_open(fd)) {
+        sock_op op;
+        memset(&op, 0, sizeof(op));
+        op.kind = SOCK_OP_CLOSE;
+        op.fd = fd;
+        socket_journal_record(&op);
+    }
+    return ret;
 }
 
 static wasi_errno_t
@@ -1219,10 +1232,22 @@ wasi_sock_bind(wasm_exec_env_t exec_env, wasi_fd_t fd, wasi_addr_t *addr)
     if (!wasi_ctx)
         return __WASI_EACCES;
 
+    wasi_errno_t ret;
     curfds = wasi_ctx_get_curfds(module_inst, wasi_ctx);
     addr_pool = wasi_ctx_get_addr_pool(module_inst, wasi_ctx);
 
-    return wasi_ssp_sock_bind(exec_env, curfds, addr_pool, fd, addr);
+    ret = wasi_ssp_sock_bind(exec_env, curfds, addr_pool, fd, addr);
+    if (ret == __WASI_ESUCCESS) {
+        sock_op op;
+        memset(&op, 0, sizeof(op));
+        op.kind = SOCK_OP_BIND;
+        op.fd = fd;
+        if (addr) {
+            op.addr = *addr;
+        }
+        socket_journal_record(&op);
+    }
+    return ret;
 }
 
 static wasi_errno_t
@@ -1621,9 +1646,20 @@ wasi_sock_open(wasm_exec_env_t exec_env, wasi_fd_t poolfd,
     if (!wasi_ctx)
         return __WASI_EACCES;
 
+    wasi_errno_t ret;
     curfds = wasi_ctx_get_curfds(module_inst, wasi_ctx);
 
-    return wasi_ssp_sock_open(exec_env, curfds, poolfd, af, socktype, sockfd);
+    ret = wasi_ssp_sock_open(exec_env, curfds, poolfd, af, socktype, sockfd);
+    if (ret == __WASI_ESUCCESS) {
+        sock_op op;
+        memset(&op, 0, sizeof(op));
+        op.kind = SOCK_OP_OPEN;
+        op.fd = *sockfd;
+        op.af = af;
+        op.socktype = socktype;
+        socket_journal_record(&op);
+    }
+    return ret;
 }
 
 static wasi_errno_t
@@ -1636,9 +1672,19 @@ wasi_sock_set_broadcast(wasm_exec_env_t exec_env, wasi_fd_t fd, bool is_enabled)
     if (!wasi_ctx)
         return __WASI_EACCES;
 
+    wasi_errno_t ret;
     curfds = wasi_ctx_get_curfds(module_inst, wasi_ctx);
 
-    return wasmtime_ssp_sock_set_broadcast(exec_env, curfds, fd, is_enabled);
+    ret = wasmtime_ssp_sock_set_broadcast(exec_env, curfds, fd, is_enabled);
+    if (ret == __WASI_ESUCCESS) {
+        sock_op op;
+        memset(&op, 0, sizeof(op));
+        op.kind = SOCK_OP_SET_BROADCAST;
+        op.fd = fd;
+        op.val = is_enabled ? 1 : 0;
+        socket_journal_record(&op);
+    }
+    return ret;
 }
 
 static wasi_errno_t
@@ -1716,9 +1762,19 @@ wasi_sock_set_reuse_addr(wasm_exec_env_t exec_env, wasi_fd_t fd,
     if (!wasi_ctx)
         return __WASI_EACCES;
 
+    wasi_errno_t ret;
     curfds = wasi_ctx_get_curfds(module_inst, wasi_ctx);
 
-    return wasmtime_ssp_sock_set_reuse_addr(exec_env, curfds, fd, is_enabled);
+    ret = wasmtime_ssp_sock_set_reuse_addr(exec_env, curfds, fd, is_enabled);
+    if (ret == __WASI_ESUCCESS) {
+        sock_op op;
+        memset(&op, 0, sizeof(op));
+        op.kind = SOCK_OP_SET_REUSE_ADDR;
+        op.fd = fd;
+        op.val = is_enabled ? 1 : 0;
+        socket_journal_record(&op);
+    }
+    return ret;
 }
 
 static wasi_errno_t
@@ -1861,10 +1917,20 @@ wasi_sock_set_ip_multicast_loop(wasm_exec_env_t exec_env, wasi_fd_t fd,
     if (!wasi_ctx)
         return __WASI_EACCES;
 
+    wasi_errno_t ret;
     curfds = wasi_ctx_get_curfds(module_inst, wasi_ctx);
 
-    return wasmtime_ssp_sock_set_ip_multicast_loop(exec_env, curfds, fd, ipv6,
+    ret = wasmtime_ssp_sock_set_ip_multicast_loop(exec_env, curfds, fd, ipv6,
                                                    is_enabled);
+    if (ret == __WASI_ESUCCESS) {
+        sock_op op;
+        memset(&op, 0, sizeof(op));
+        op.kind = SOCK_OP_SET_IP_MULTICAST_LOOP;
+        op.fd = fd;
+        op.val = (ipv6 ? 2 : 0) | (is_enabled ? 1 : 0);
+        socket_journal_record(&op);
+    }
+    return ret;
 }
 
 static wasi_errno_t
@@ -1882,10 +1948,23 @@ wasi_sock_set_ip_add_membership(wasm_exec_env_t exec_env, wasi_fd_t fd,
     if (!validate_native_addr(imr_multiaddr, sizeof(__wasi_addr_ip_t)))
         return __WASI_EINVAL;
 
+    wasi_errno_t ret;
     curfds = wasi_ctx_get_curfds(module_inst, wasi_ctx);
 
-    return wasmtime_ssp_sock_set_ip_add_membership(
+    ret = wasmtime_ssp_sock_set_ip_add_membership(
         exec_env, curfds, fd, imr_multiaddr, imr_interface);
+    if (ret == __WASI_ESUCCESS) {
+        sock_op op;
+        memset(&op, 0, sizeof(op));
+        op.kind = SOCK_OP_ADD_MEMBERSHIP;
+        op.fd = fd;
+        if (imr_multiaddr) {
+            op.multiaddr = *imr_multiaddr;
+        }
+        op.interface = imr_interface;
+        socket_journal_record(&op);
+    }
+    return ret;
 }
 
 static wasi_errno_t
@@ -1903,10 +1982,23 @@ wasi_sock_set_ip_drop_membership(wasm_exec_env_t exec_env, wasi_fd_t fd,
     if (!validate_native_addr(imr_multiaddr, sizeof(__wasi_addr_ip_t)))
         return __WASI_EINVAL;
 
+    wasi_errno_t ret;
     curfds = wasi_ctx_get_curfds(module_inst, wasi_ctx);
 
-    return wasmtime_ssp_sock_set_ip_drop_membership(
+    ret = wasmtime_ssp_sock_set_ip_drop_membership(
         exec_env, curfds, fd, imr_multiaddr, imr_interface);
+    if (ret == __WASI_ESUCCESS) {
+        sock_op op;
+        memset(&op, 0, sizeof(op));
+        op.kind = SOCK_OP_DROP_MEMBERSHIP;
+        op.fd = fd;
+        if (imr_multiaddr) {
+            op.multiaddr = *imr_multiaddr;
+        }
+        op.interface = imr_interface;
+        socket_journal_record(&op);
+    }
+    return ret;
 }
 
 static wasi_errno_t
@@ -1919,9 +2011,19 @@ wasi_sock_set_ip_ttl(wasm_exec_env_t exec_env, wasi_fd_t fd, uint8_t ttl_s)
     if (!wasi_ctx)
         return __WASI_EACCES;
 
+    wasi_errno_t ret;
     curfds = wasi_ctx_get_curfds(module_inst, wasi_ctx);
 
-    return wasmtime_ssp_sock_set_ip_ttl(exec_env, curfds, fd, ttl_s);
+    ret = wasmtime_ssp_sock_set_ip_ttl(exec_env, curfds, fd, ttl_s);
+    if (ret == __WASI_ESUCCESS) {
+        sock_op op;
+        memset(&op, 0, sizeof(op));
+        op.kind = SOCK_OP_SET_IP_TTL;
+        op.fd = fd;
+        op.val = ttl_s;
+        socket_journal_record(&op);
+    }
+    return ret;
 }
 
 static wasi_errno_t
@@ -1935,9 +2037,19 @@ wasi_sock_set_ip_multicast_ttl(wasm_exec_env_t exec_env, wasi_fd_t fd,
     if (!wasi_ctx)
         return __WASI_EACCES;
 
+    wasi_errno_t ret;
     curfds = wasi_ctx_get_curfds(module_inst, wasi_ctx);
 
-    return wasmtime_ssp_sock_set_ip_multicast_ttl(exec_env, curfds, fd, ttl_s);
+    ret = wasmtime_ssp_sock_set_ip_multicast_ttl(exec_env, curfds, fd, ttl_s);
+    if (ret == __WASI_ESUCCESS) {
+        sock_op op;
+        memset(&op, 0, sizeof(op));
+        op.kind = SOCK_OP_SET_IP_MULTICAST_TTL;
+        op.fd = fd;
+        op.val = ttl_s;
+        socket_journal_record(&op);
+    }
+    return ret;
 }
 
 static wasi_errno_t

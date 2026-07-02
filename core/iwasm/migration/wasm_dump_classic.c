@@ -11,6 +11,8 @@
 
 #include "../interpreter/wasm_runtime.h"
 #include "wasm_migration.h"
+#include "wasm_socket_journal.h"
+
 #include "wasm_dump.h"
 #include "wasm_dispatch.h"
 #include "wasm_migration_helper.h"
@@ -396,6 +398,10 @@ wasm_dump_with_prefix(WASMExecEnv *exec_env, WASMModuleInstance *module,
     if (rc < 0) {
         LOG_ERROR("Failed to dump thread attrs\n");
         return rc;
+    }
+
+    if (file_prefix == NULL || strcmp(file_prefix, MAIN_THREAD_PREFIX) == 0) {
+        socket_journal_dump(file_prefix);
     }
 
     LOG_VERBOSE("Success to dump img for wamr\n");
