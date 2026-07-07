@@ -439,6 +439,20 @@ int
 os_socket_create(bh_socket_t *sock, bool is_ipv4, bool is_tcp);
 
 /**
+ * Create a socket with an explicit socket type and protocol.
+ *
+ * @param sock [OUTPUT] the pointer of socket
+ * @param is_ipv4 true for IPv4, false for IPv6
+ * @param socktype socket type such as SOCK_STREAM, SOCK_DGRAM, or SOCK_RAW
+ * @param protocol protocol passed to the host socket() call
+ *
+ * @return 0 if success, -1 otherwise
+ */
+int
+os_socket_create_ext(bh_socket_t *sock, bool is_ipv4, int socktype,
+                     int protocol);
+
+/**
  * Assign the address and port to the socket
  *
  * @param socket the socket to bind

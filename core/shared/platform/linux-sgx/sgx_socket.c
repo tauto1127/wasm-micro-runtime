@@ -687,6 +687,15 @@ os_socket_connect(bh_socket_t socket, const char *addr, int port)
 int
 os_socket_create(bh_socket_t *sock, bool is_ipv4, bool is_tcp)
 {
+    return os_socket_create_ext(sock, is_ipv4,
+                                is_tcp ? SOCK_STREAM : SOCK_DGRAM,
+                                is_tcp ? IPPROTO_TCP : 0);
+}
+
+int
+os_socket_create_ext(bh_socket_t *sock, bool is_ipv4, int socktype,
+                     int protocol)
+{
     int af;
 
     if (!sock) {
@@ -701,17 +710,29 @@ os_socket_create(bh_socket_t *sock, bool is_ipv4, bool is_tcp)
         return BHT_ERROR;
     }
 
-    if (is_tcp) {
-        if (ocall_socket(sock, af, SOCK_STREAM, IPPROTO_TCP) != SGX_SUCCESS) {
+    if (socktype == SOCK_STREAM) {
+        if (ocall_socket(sock, af, SOCK_STREAM,
+                         protocol ? protocol : IPPROTO_TCP)
+            != SGX_SUCCESS) {
+            TRACE_OCALL_FAIL();
+            return -1;
+        }
+    }
+    else if (socktype == SOCK_DGRAM) {
+        if (ocall_socket(sock, af, SOCK_DGRAM, protocol) != SGX_SUCCESS) {
+            TRACE_OCALL_FAIL();
+            return -1;
+        }
+    }
+    else if (socktype == SOCK_RAW) {
+        if (ocall_socket(sock, af, SOCK_RAW, protocol) != SGX_SUCCESS) {
             TRACE_OCALL_FAIL();
             return -1;
         }
     }
     else {
-        if (ocall_socket(sock, af, SOCK_DGRAM, 0) != SGX_SUCCESS) {
-            TRACE_OCALL_FAIL();
-            return -1;
-        }
+        errno = EPROTONOSUPPORT;
+        return BHT_ERROR;
     }
 
     if (*sock == -1) {

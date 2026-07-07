@@ -1657,6 +1657,36 @@ wasi_sock_open(wasm_exec_env_t exec_env, wasi_fd_t poolfd,
         op.fd = *sockfd;
         op.af = af;
         op.socktype = socktype;
+        op.protocol = 0;
+        socket_journal_record(&op);
+    }
+    return ret;
+}
+
+static wasi_errno_t
+wasi_sock_open_raw(wasm_exec_env_t exec_env, wasi_fd_t poolfd,
+                   wasi_address_family_t af, int protocol, wasi_fd_t *sockfd)
+{
+    wasm_module_inst_t module_inst = get_module_inst(exec_env);
+    wasi_ctx_t wasi_ctx = get_wasi_ctx(module_inst);
+    struct fd_table *curfds = NULL;
+
+    if (!wasi_ctx)
+        return __WASI_EACCES;
+
+    wasi_errno_t ret;
+    curfds = wasi_ctx_get_curfds(module_inst, wasi_ctx);
+
+    ret = wasi_ssp_sock_open_raw(exec_env, curfds, poolfd, af, protocol,
+                                 sockfd);
+    if (ret == __WASI_ESUCCESS) {
+        sock_op op;
+        memset(&op, 0, sizeof(op));
+        op.kind = SOCK_OP_OPEN;
+        op.fd = *sockfd;
+        op.af = af;
+        op.socktype = SOCKET_RAW;
+        op.protocol = protocol;
         socket_journal_record(&op);
     }
     return ret;
@@ -2426,6 +2456,7 @@ static NativeSymbol native_symbols_libc_wasi[] = {
     REG_NATIVE_FUNC(sock_get_ipv6_only, "(i*)i"),
     REG_NATIVE_FUNC(sock_listen, "(ii)i"),
     REG_NATIVE_FUNC(sock_open, "(iii*)i"),
+    REG_NATIVE_FUNC(sock_open_raw, "(iii*)i"),
     REG_NATIVE_FUNC(sock_recv, "(i*ii**)i"),
     REG_NATIVE_FUNC(sock_recv_from, "(i*ii**)i"),
     REG_NATIVE_FUNC(sock_send, "(i*ii*)i"),

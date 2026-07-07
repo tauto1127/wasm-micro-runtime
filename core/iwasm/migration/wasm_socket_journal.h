@@ -21,6 +21,7 @@ typedef struct {
     int32_t   fd;                       /* OPEN=結果fd, 他=対象fd */
     int32_t   af;
     int32_t   socktype;                 /* OPEN */
+    int32_t   protocol;                 /* OPEN */
     __wasi_addr_t   addr;                 /* BIND */
     __wasi_addr_ip_t multiaddr;
     uint32_t  interface;                 /* ADD/DROP */

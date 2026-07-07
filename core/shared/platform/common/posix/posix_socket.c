@@ -118,17 +118,33 @@ bh_sockaddr_to_sockaddr(const bh_sockaddr_t *bh_sockaddr,
 int
 os_socket_create(bh_socket_t *sock, bool is_ipv4, bool is_tcp)
 {
+    return os_socket_create_ext(sock, is_ipv4,
+                                is_tcp ? SOCK_STREAM : SOCK_DGRAM,
+                                is_tcp ? IPPROTO_TCP : 0);
+}
+
+int
+os_socket_create_ext(bh_socket_t *sock, bool is_ipv4, int socktype,
+                     int protocol)
+{
     int af = is_ipv4 ? AF_INET : AF_INET6;
 
     if (!sock) {
         return BHT_ERROR;
     }
 
-    if (is_tcp) {
-        *sock = socket(af, SOCK_STREAM, IPPROTO_TCP);
+    if (socktype == SOCK_STREAM) {
+        *sock = socket(af, SOCK_STREAM, protocol ? protocol : IPPROTO_TCP);
+    }
+    else if (socktype == SOCK_DGRAM) {
+        *sock = socket(af, SOCK_DGRAM, protocol);
+    }
+    else if (socktype == SOCK_RAW) {
+        *sock = socket(af, SOCK_RAW, protocol);
     }
     else {
-        *sock = socket(af, SOCK_DGRAM, 0);
+        errno = EPROTONOSUPPORT;
+        return BHT_ERROR;
     }
 
     return (*sock == -1) ? BHT_ERROR : BHT_OK;

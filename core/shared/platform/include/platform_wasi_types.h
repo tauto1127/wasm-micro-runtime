@@ -535,6 +535,7 @@ typedef enum {
     SOCKET_ANY = -1,
     SOCKET_DGRAM = 0,
     SOCKET_STREAM,
+    SOCKET_RAW,
 } __wasi_sock_type_t;
 
 typedef uint16_t __wasi_ip_port_t;

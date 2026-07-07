@@ -21,6 +21,7 @@ typedef enum {
     SOCKET_ANY = -1,
     SOCKET_DGRAM = 0,
     SOCKET_STREAM,
+    SOCKET_RAW,
 } __wasi_sock_type_t;
 
 typedef uint16_t __wasi_ip_port_t;
@@ -117,6 +118,10 @@ typedef struct __wasi_addr_info_hints_t {
 #define SO_REUSEPORT 15
 #define SO_RCVTIMEO 20
 #define SO_SNDTIMEO 21
+
+#ifndef SOCK_RAW
+#define SOCK_RAW 3
+#endif
 
 #define TCP_NODELAY 1
 #define TCP_KEEPIDLE 4
@@ -501,6 +506,20 @@ __wasi_sock_open(__wasi_fd_t fd, __wasi_address_family_t af,
 {
     return (__wasi_errno_t)__imported_wasi_snapshot_preview1_sock_open(
         (int32_t)fd, (int32_t)af, (int32_t)socktype, (int32_t)sockfd);
+}
+
+int32_t
+__imported_wasi_snapshot_preview1_sock_open_raw(int32_t arg0, int32_t arg1,
+                                                int32_t arg2, int32_t arg3)
+    __attribute__((__import_module__("wasi_snapshot_preview1"),
+                   __import_name__("sock_open_raw")));
+
+static inline __wasi_errno_t
+__wasi_sock_open_raw(__wasi_fd_t fd, __wasi_address_family_t af,
+                     int protocol, __wasi_fd_t *sockfd)
+{
+    return (__wasi_errno_t)__imported_wasi_snapshot_preview1_sock_open_raw(
+        (int32_t)fd, (int32_t)af, (int32_t)protocol, (int32_t)sockfd);
 }
 
 /**

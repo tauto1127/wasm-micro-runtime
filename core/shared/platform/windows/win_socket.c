@@ -57,6 +57,15 @@ deinit_winsock()
 int
 os_socket_create(bh_socket_t *sock, bool is_ipv4, bool is_tcp)
 {
+    return os_socket_create_ext(sock, is_ipv4,
+                                is_tcp ? SOCK_STREAM : SOCK_DGRAM,
+                                is_tcp ? IPPROTO_TCP : 0);
+}
+
+int
+os_socket_create_ext(bh_socket_t *sock, bool is_ipv4, int socktype,
+                     int protocol)
+{
     int af;
 
     if (!sock) {
@@ -82,11 +91,20 @@ os_socket_create(bh_socket_t *sock, bool is_ipv4, bool is_tcp)
         return BHT_ERROR;
     }
 
-    if (is_tcp) {
-        (*sock)->raw.socket = socket(af, SOCK_STREAM, IPPROTO_TCP);
+    if (socktype == SOCK_STREAM) {
+        (*sock)->raw.socket =
+            socket(af, SOCK_STREAM, protocol ? protocol : IPPROTO_TCP);
+    }
+    else if (socktype == SOCK_DGRAM) {
+        (*sock)->raw.socket = socket(af, SOCK_DGRAM, protocol);
+    }
+    else if (socktype == SOCK_RAW) {
+        (*sock)->raw.socket = socket(af, SOCK_RAW, protocol);
     }
     else {
-        (*sock)->raw.socket = socket(af, SOCK_DGRAM, 0);
+        BH_FREE(*sock);
+        errno = EPROTONOSUPPORT;
+        return BHT_ERROR;
     }
 
     if ((*sock)->raw.socket == INVALID_SOCKET) {

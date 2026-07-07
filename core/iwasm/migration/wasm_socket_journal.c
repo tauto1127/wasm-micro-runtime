@@ -197,7 +197,7 @@ socket_journal_restore(wasm_exec_env_t exec_env, const char *file_prefix)
 
         switch (op->kind) {
             case SOCK_OP_OPEN: {
-                err = wasi_ssp_sock_restore_open(exec_env, curfds, op->fd, op->af, op->socktype);
+                err = wasi_ssp_sock_restore_open(exec_env, curfds, op->fd, op->af, op->socktype, op->protocol);
                 if (err != __WASI_ESUCCESS) {
                     fprintf(stderr, "Restore: failed to restore sock_open for fd %d, err %d\n", op->fd, err);
                 }

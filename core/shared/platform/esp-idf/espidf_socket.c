@@ -44,15 +44,33 @@ sockaddr_to_bh_sockaddr(const struct sockaddr *sockaddr, socklen_t socklen,
 int
 os_socket_create(bh_socket_t *sock, bool is_ipv4, bool is_tcp)
 {
+    return os_socket_create_ext(sock, is_ipv4,
+                                is_tcp ? SOCK_STREAM : SOCK_DGRAM,
+                                is_tcp ? IPPROTO_TCP : 0);
+}
+
+int
+os_socket_create_ext(bh_socket_t *sock, bool is_ipv4, int socktype,
+                     int protocol)
+{
     if (!sock) {
         return BHT_ERROR;
     }
 
-    if (is_tcp) {
-        *sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    (void)is_ipv4;
+
+    if (socktype == SOCK_STREAM) {
+        *sock = socket(AF_INET, SOCK_STREAM, protocol ? protocol : IPPROTO_TCP);
+    }
+    else if (socktype == SOCK_DGRAM) {
+        *sock = socket(AF_INET, SOCK_DGRAM, protocol);
+    }
+    else if (socktype == SOCK_RAW) {
+        *sock = socket(AF_INET, SOCK_RAW, protocol);
     }
     else {
-        *sock = socket(AF_INET, SOCK_DGRAM, 0);
+        errno = EPROTONOSUPPORT;
+        return BHT_ERROR;
     }
 
     return (*sock == -1) ? BHT_ERROR : BHT_OK;

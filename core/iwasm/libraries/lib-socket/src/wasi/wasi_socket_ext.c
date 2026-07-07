@@ -364,11 +364,19 @@ socket(int domain, int type, int protocol)
     else if (SOCK_STREAM == type) {
         socktype = SOCKET_STREAM;
     }
+    else if (SOCK_RAW == type) {
+        socktype = SOCKET_RAW;
+    }
     else {
         return __WASI_ERRNO_NOPROTOOPT;
     }
 
-    error = __wasi_sock_open(poolfd, af, socktype, &sockfd);
+    if (SOCKET_RAW == socktype) {
+        error = __wasi_sock_open_raw(poolfd, af, protocol, &sockfd);
+    }
+    else {
+        error = __wasi_sock_open(poolfd, af, socktype, &sockfd);
+    }
     HANDLE_ERROR(error)
 
     return sockfd;

@@ -220,6 +220,7 @@ extern "C" {
 
 #define SOCK_STREAM 1
 #define SOCK_DGRAM 2
+#define SOCK_RAW 3
 
 #define MSG_OOB 0x0001
 #define MSG_PEEK 0x0002

@@ -2657,14 +2657,17 @@ wasi_ssp_sock_listen(wasm_exec_env_t exec_env, struct fd_table *curfds,
     return __WASI_ESUCCESS;
 }
 
-__wasi_errno_t
-wasi_ssp_sock_open(wasm_exec_env_t exec_env, struct fd_table *curfds,
-                   __wasi_fd_t poolfd, __wasi_address_family_t af,
-                   __wasi_sock_type_t socktype, __wasi_fd_t *sockfd)
+static __wasi_errno_t
+wasi_ssp_sock_open_with_protocol(wasm_exec_env_t exec_env,
+                                 struct fd_table *curfds,
+                                 __wasi_fd_t poolfd,
+                                 __wasi_address_family_t af,
+                                 __wasi_sock_type_t socktype, int protocol,
+                                 __wasi_fd_t *sockfd)
 {
     bh_socket_t sock;
-    bool is_tcp = SOCKET_DGRAM == socktype ? false : true;
     bool is_ipv4 = INET6 == af ? false : true;
+    int os_socktype;
     int ret;
     __wasi_filetype_t wasi_type = __WASI_FILETYPE_UNKNOWN;
     __wasi_rights_t max_base = 0, max_inheriting = 0;
@@ -2672,7 +2675,16 @@ wasi_ssp_sock_open(wasm_exec_env_t exec_env, struct fd_table *curfds,
 
     (void)poolfd;
 
-    ret = os_socket_create(&sock, is_ipv4, is_tcp);
+    if (SOCKET_STREAM == socktype)
+        os_socktype = SOCK_STREAM;
+    else if (SOCKET_DGRAM == socktype)
+        os_socktype = SOCK_DGRAM;
+    else if (SOCKET_RAW == socktype)
+        os_socktype = SOCK_RAW;
+    else
+        return __WASI_EPROTONOSUPPORT;
+
+    ret = os_socket_create_ext(&sock, is_ipv4, os_socktype, protocol);
     if (BHT_OK != ret) {
         return convert_errno(errno);
     }
@@ -2687,7 +2699,7 @@ wasi_ssp_sock_open(wasm_exec_env_t exec_env, struct fd_table *curfds,
     if (SOCKET_DGRAM == socktype) {
         assert(wasi_type == __WASI_FILETYPE_SOCKET_DGRAM);
     }
-    else {
+    else if (SOCKET_STREAM == socktype) {
         assert(wasi_type == __WASI_FILETYPE_SOCKET_STREAM);
     }
 
@@ -2699,6 +2711,24 @@ wasi_ssp_sock_open(wasm_exec_env_t exec_env, struct fd_table *curfds,
     }
 
     return __WASI_ESUCCESS;
+}
+
+__wasi_errno_t
+wasi_ssp_sock_open(wasm_exec_env_t exec_env, struct fd_table *curfds,
+                   __wasi_fd_t poolfd, __wasi_address_family_t af,
+                   __wasi_sock_type_t socktype, __wasi_fd_t *sockfd)
+{
+    return wasi_ssp_sock_open_with_protocol(exec_env, curfds, poolfd, af,
+                                            socktype, 0, sockfd);
+}
+
+__wasi_errno_t
+wasi_ssp_sock_open_raw(wasm_exec_env_t exec_env, struct fd_table *curfds,
+                       __wasi_fd_t poolfd, __wasi_address_family_t af,
+                       int protocol, __wasi_fd_t *sockfd)
+{
+    return wasi_ssp_sock_open_with_protocol(exec_env, curfds, poolfd, af,
+                                            SOCKET_RAW, protocol, sockfd);
 }
 
 __wasi_errno_t
@@ -3362,10 +3392,12 @@ wasmtime_ssp_sock_get_ip_multicast_loop(wasm_exec_env_t exec_env,
 
 __wasi_errno_t
 wasi_ssp_sock_restore_open(wasm_exec_env_t exec_env, struct fd_table *curfds,
-                           __wasi_fd_t target_fd, int af, int socktype)
+                           __wasi_fd_t target_fd, int af, int socktype,
+                           int protocol)
 {
     bh_socket_t sock;
-    bool is_ipv4 = (af != INET6), is_tcp = (socktype != SOCKET_DGRAM);
+    bool is_ipv4 = (af != INET6);
+    int os_socktype;
     struct fd_object *stale = NULL;
 
     /* If target_fd is already occupied (e.g. divergent restore args, or a
@@ -3379,7 +3411,16 @@ wasi_ssp_sock_restore_open(wasm_exec_env_t exec_env, struct fd_table *curfds,
     if (stale != NULL)
         fd_object_release(exec_env, stale);
 
-    if (os_socket_create(&sock, is_ipv4, is_tcp) != BHT_OK)
+    if (socktype == SOCKET_STREAM)
+        os_socktype = SOCK_STREAM;
+    else if (socktype == SOCKET_DGRAM)
+        os_socktype = SOCK_DGRAM;
+    else if (socktype == SOCKET_RAW)
+        os_socktype = SOCK_RAW;
+    else
+        return __WASI_EPROTONOSUPPORT;
+
+    if (os_socket_create_ext(&sock, is_ipv4, os_socktype, protocol) != BHT_OK)
         return convert_errno(errno);
     if (!fd_table_insert_existing(curfds, target_fd, sock, false)) {
         os_socket_close(sock);
@@ -3387,4 +3428,3 @@ wasi_ssp_sock_restore_open(wasm_exec_env_t exec_env, struct fd_table *curfds,
     }
     return __WASI_ESUCCESS;
 }
-
