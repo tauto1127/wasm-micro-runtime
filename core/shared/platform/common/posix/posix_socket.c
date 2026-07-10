@@ -11,6 +11,12 @@
 #include <netdb.h>
 #include <netinet/tcp.h>
 #include <netinet/in.h>
+#include <string.h>
+#ifdef __linux__
+#include <net/if.h>
+#include <linux/if_packet.h>
+#include <linux/if_ether.h>
+#endif
 
 static bool
 textual_addr_to_sockaddr(const char *textual, int port, struct sockaddr *out,
@@ -148,6 +154,65 @@ os_socket_create_ext(bh_socket_t *sock, bool is_ipv4, int socktype,
     }
 
     return (*sock == -1) ? BHT_ERROR : BHT_OK;
+}
+
+int
+os_socket_create_packet(bh_socket_t *sock, const char *ifname, int protocol,
+                        int flags)
+{
+#ifdef __linux__
+    unsigned int ifindex;
+    struct sockaddr_ll sll;
+    int fd;
+    uint16_t proto_be;
+
+    (void)flags;
+
+    if (!sock || !ifname || ifname[0] == '\0') {
+        errno = EINVAL;
+        return BHT_ERROR;
+    }
+
+    ifindex = if_nametoindex(ifname);
+    if (ifindex == 0) {
+        /* if_nametoindex sets errno on failure (e.g. ENODEV / ENXIO) */
+        if (errno == 0)
+            errno = ENODEV;
+        return BHT_ERROR;
+    }
+
+    proto_be = htons((uint16_t)protocol);
+    fd = socket(AF_PACKET, SOCK_RAW, proto_be);
+    if (fd < 0) {
+        return BHT_ERROR;
+    }
+
+    memset(&sll, 0, sizeof(sll));
+    sll.sll_family = AF_PACKET;
+    sll.sll_protocol = proto_be;
+    sll.sll_ifindex = (int)ifindex;
+
+    if (bind(fd, (struct sockaddr *)&sll, sizeof(sll)) < 0) {
+        int saved = errno;
+        close(fd);
+        errno = saved;
+        return BHT_ERROR;
+    }
+
+    *sock = fd;
+    return BHT_OK;
+#else
+    (void)sock;
+    (void)ifname;
+    (void)protocol;
+    (void)flags;
+#ifdef ENOTSUP
+    errno = ENOTSUP;
+#else
+    errno = EOPNOTSUPP;
+#endif
+    return BHT_ERROR;
+#endif
 }
 
 int

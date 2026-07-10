@@ -279,9 +279,20 @@ wasi_ssp_sock_open_raw(wasm_exec_env_t exec_env, struct fd_table *curfds,
                        int protocol, __wasi_fd_t *sockfd) WARN_UNUSED;
 
 __wasi_errno_t
+wasi_ssp_sock_open_packet(wasm_exec_env_t exec_env, struct fd_table *curfds,
+                          const char *ifname, int protocol, int flags,
+                          __wasi_fd_t *sockfd) WARN_UNUSED;
+
+__wasi_errno_t
 wasi_ssp_sock_restore_open(wasm_exec_env_t exec_env, struct fd_table *curfds,
                            __wasi_fd_t target_fd, int af, int socktype,
                            int protocol) WARN_UNUSED;
+
+__wasi_errno_t
+wasi_ssp_sock_restore_open_packet(wasm_exec_env_t exec_env,
+                                  struct fd_table *curfds,
+                                  __wasi_fd_t target_fd, const char *ifname,
+                                  int protocol, int flags) WARN_UNUSED;
 
 
 __wasi_errno_t

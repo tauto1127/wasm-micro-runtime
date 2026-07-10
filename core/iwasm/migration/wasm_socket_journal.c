@@ -67,7 +67,9 @@ socket_journal_has_open(int32_t fd)
     bool found = false;
     lock_journal();
     for (i = 0; i < g_journal_count; i++) {
-        if (g_journal[i].kind == SOCK_OP_OPEN && g_journal[i].fd == fd) {
+        if ((g_journal[i].kind == SOCK_OP_OPEN
+             || g_journal[i].kind == SOCK_OP_OPEN_PACKET)
+            && g_journal[i].fd == fd) {
             found = true;
         }
         else if ((g_journal[i].kind == SOCK_OP_CLOSE) && g_journal[i].fd == fd) {
@@ -127,7 +129,9 @@ is_fd_opened_in_journal(int32_t fd, int current_index)
 {
     int i;
     for (i = 0; i < current_index; i++) {
-        if (g_journal[i].kind == SOCK_OP_OPEN && g_journal[i].fd == fd) {
+        if ((g_journal[i].kind == SOCK_OP_OPEN
+             || g_journal[i].kind == SOCK_OP_OPEN_PACKET)
+            && g_journal[i].fd == fd) {
             return true;
         }
     }
@@ -200,6 +204,18 @@ socket_journal_restore(wasm_exec_env_t exec_env, const char *file_prefix)
                 err = wasi_ssp_sock_restore_open(exec_env, curfds, op->fd, op->af, op->socktype, op->protocol);
                 if (err != __WASI_ESUCCESS) {
                     fprintf(stderr, "Restore: failed to restore sock_open for fd %d, err %d\n", op->fd, err);
+                }
+                break;
+            }
+            case SOCK_OP_OPEN_PACKET: {
+                err = wasi_ssp_sock_restore_open_packet(exec_env, curfds, op->fd,
+                                                       op->ifname, op->protocol,
+                                                       op->flags);
+                if (err != __WASI_ESUCCESS) {
+                    fprintf(stderr,
+                            "Restore: failed to restore sock_open_packet for "
+                            "fd %d ifname=%s protocol=%d flags=%d, err %d\n",
+                            op->fd, op->ifname, op->protocol, op->flags, err);
                 }
                 break;
             }

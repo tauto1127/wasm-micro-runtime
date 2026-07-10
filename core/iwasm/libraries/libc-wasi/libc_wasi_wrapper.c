@@ -1693,6 +1693,40 @@ wasi_sock_open_raw(wasm_exec_env_t exec_env, wasi_fd_t poolfd,
 }
 
 static wasi_errno_t
+wasi_sock_open_packet(wasm_exec_env_t exec_env, const char *ifname,
+                      int protocol, int flags, wasi_fd_t *sockfd)
+{
+    wasm_module_inst_t module_inst = get_module_inst(exec_env);
+    wasi_ctx_t wasi_ctx = get_wasi_ctx(module_inst);
+    struct fd_table *curfds = NULL;
+
+    if (!wasi_ctx)
+        return __WASI_EACCES;
+
+    if (!ifname)
+        return __WASI_EINVAL;
+
+    wasi_errno_t ret;
+    curfds = wasi_ctx_get_curfds(module_inst, wasi_ctx);
+
+    ret = wasi_ssp_sock_open_packet(exec_env, curfds, ifname, protocol, flags,
+                                    sockfd);
+    if (ret == __WASI_ESUCCESS) {
+        sock_op op;
+        memset(&op, 0, sizeof(op));
+        op.kind = SOCK_OP_OPEN_PACKET;
+        op.fd = *sockfd;
+        op.protocol = protocol;
+        op.flags = flags;
+        /* Truncate safely into fixed journal buffer (null-terminated). */
+        strncpy(op.ifname, ifname, sizeof(op.ifname) - 1);
+        op.ifname[sizeof(op.ifname) - 1] = '\0';
+        socket_journal_record(&op);
+    }
+    return ret;
+}
+
+static wasi_errno_t
 wasi_sock_set_broadcast(wasm_exec_env_t exec_env, wasi_fd_t fd, bool is_enabled)
 {
     wasm_module_inst_t module_inst = get_module_inst(exec_env);
@@ -2457,6 +2491,7 @@ static NativeSymbol native_symbols_libc_wasi[] = {
     REG_NATIVE_FUNC(sock_listen, "(ii)i"),
     REG_NATIVE_FUNC(sock_open, "(iii*)i"),
     REG_NATIVE_FUNC(sock_open_raw, "(iii*)i"),
+    REG_NATIVE_FUNC(sock_open_packet, "($ii*)i"),
     REG_NATIVE_FUNC(sock_recv, "(i*ii**)i"),
     REG_NATIVE_FUNC(sock_recv_from, "(i*ii**)i"),
     REG_NATIVE_FUNC(sock_send, "(i*ii*)i"),

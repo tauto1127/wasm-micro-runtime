@@ -453,6 +453,23 @@ os_socket_create_ext(bh_socket_t *sock, bool is_ipv4, int socktype,
                      int protocol);
 
 /**
+ * Create a packet socket bound to a network interface for Ethernet frame I/O.
+ *
+ * Linux: AF_PACKET/SOCK_RAW + if_nametoindex + bind(sockaddr_ll).
+ * Other platforms: return BHT_ERROR with errno ENOTSUP / EOPNOTSUPP.
+ *
+ * @param sock [OUTPUT] the pointer of socket
+ * @param ifname interface name (e.g. "eth0")
+ * @param protocol Ethernet protocol in host byte order (htons applied here)
+ * @param flags reserved; currently ignored (pass 0)
+ *
+ * @return 0 if success, -1 otherwise
+ */
+int
+os_socket_create_packet(bh_socket_t *sock, const char *ifname, int protocol,
+                        int flags);
+
+/**
  * Assign the address and port to the socket
  *
  * @param socket the socket to bind

@@ -383,6 +383,22 @@ socket(int domain, int type, int protocol)
 }
 
 int
+sock_open_packet(const char *ifname, int protocol, int flags)
+{
+    __wasi_fd_t sockfd;
+    __wasi_errno_t error;
+
+    if (!ifname || ifname[0] == '\0') {
+        HANDLE_ERROR(__WASI_ERRNO_INVAL)
+    }
+
+    error = __wasi_sock_open_packet(ifname, protocol, flags, &sockfd);
+    HANDLE_ERROR(error)
+
+    return (int)sockfd;
+}
+
+int
 getsockname(int sockfd, struct sockaddr *addr, socklen_t *addrlen)
 {
     __wasi_addr_t wasi_addr;

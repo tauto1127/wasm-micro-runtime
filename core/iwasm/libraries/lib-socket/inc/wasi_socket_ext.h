@@ -123,6 +123,20 @@ typedef struct __wasi_addr_info_hints_t {
 #define SOCK_RAW 3
 #endif
 
+/* Host-order Ethernet protocol numbers for sock_open_packet().
+ * The host backend applies htons() before AF_PACKET socket()/bind(). */
+#ifndef ETH_P_ALL
+#define ETH_P_ALL 0x0003
+#endif
+#ifndef ETH_P_IP
+#define ETH_P_IP 0x0800
+#endif
+
+/* Max interface name length stored in journal / ABI (matches Linux IF_NAMESIZE). */
+#ifndef WASI_IFNAME_SIZE
+#define WASI_IFNAME_SIZE 16
+#endif
+
 #define TCP_NODELAY 1
 #define TCP_KEEPIDLE 4
 #define TCP_KEEPINTVL 5
@@ -181,6 +195,14 @@ recvfrom(int sockfd, void *buf, size_t len, int flags,
 
 int
 socket(int domain, int type, int protocol);
+
+/**
+ * Open a WASI fd for raw Ethernet frame I/O on the given interface.
+ * See __wasi_sock_open_packet for parameter semantics.
+ * On success returns a non-negative fd; on failure returns -1 and sets errno.
+ */
+int
+sock_open_packet(const char *ifname, int protocol, int flags);
 
 int
 getsockname(int sockfd, struct sockaddr *addr, socklen_t *addrlen);
@@ -520,6 +542,35 @@ __wasi_sock_open_raw(__wasi_fd_t fd, __wasi_address_family_t af,
 {
     return (__wasi_errno_t)__imported_wasi_snapshot_preview1_sock_open_raw(
         (int32_t)fd, (int32_t)af, (int32_t)protocol, (int32_t)sockfd);
+}
+
+/**
+ * Open a packet socket bound to a network interface for Ethernet frame I/O.
+ *
+ * Wasm-facing meaning: open an fd that can read/write raw Ethernet frames on
+ * the given interface. Linux-specific AF_PACKET / sockaddr_ll details are
+ * hidden behind this API.
+ *
+ * @param ifname   interface name (e.g. "eth0", "lo")
+ * @param protocol Ethernet protocol in host byte order (e.g. ETH_P_ALL,
+ *                 ETH_P_IP); host applies htons()
+ * @param flags    reserved; pass 0 in the initial implementation
+ * @param sockfd   [OUTPUT] allocated WASI fd
+ *
+ * After open, use existing fd_read / fd_write / fd_close (or read/write/close).
+ */
+int32_t
+__imported_wasi_snapshot_preview1_sock_open_packet(int32_t arg0, int32_t arg1,
+                                                   int32_t arg2, int32_t arg3)
+    __attribute__((__import_module__("wasi_snapshot_preview1"),
+                   __import_name__("sock_open_packet")));
+
+static inline __wasi_errno_t
+__wasi_sock_open_packet(const char *ifname, int protocol, int flags,
+                        __wasi_fd_t *sockfd)
+{
+    return (__wasi_errno_t)__imported_wasi_snapshot_preview1_sock_open_packet(
+        (int32_t)ifname, (int32_t)protocol, (int32_t)flags, (int32_t)sockfd);
 }
 
 /**

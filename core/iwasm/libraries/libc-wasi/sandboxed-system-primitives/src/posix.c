@@ -2732,6 +2732,49 @@ wasi_ssp_sock_open_raw(wasm_exec_env_t exec_env, struct fd_table *curfds,
 }
 
 __wasi_errno_t
+wasi_ssp_sock_open_packet(wasm_exec_env_t exec_env, struct fd_table *curfds,
+                          const char *ifname, int protocol, int flags,
+                          __wasi_fd_t *sockfd)
+{
+    bh_socket_t sock;
+    int ret;
+    __wasi_filetype_t wasi_type = __WASI_FILETYPE_UNKNOWN;
+    __wasi_rights_t max_base = 0, max_inheriting = 0;
+    __wasi_errno_t error;
+
+    if (!ifname || ifname[0] == '\0')
+        return __WASI_EINVAL;
+
+    ret = os_socket_create_packet(&sock, ifname, protocol, flags);
+    if (BHT_OK != ret) {
+        return convert_errno(errno);
+    }
+
+    error =
+        fd_determine_type_rights(sock, &wasi_type, &max_base, &max_inheriting);
+    if (error != __WASI_ESUCCESS) {
+        os_socket_close(sock);
+        return error;
+    }
+
+    /* Packet sockets are SOCK_RAW and typically report as UNKNOWN filetype;
+     * ensure fd_read/fd_write rights are available for Ethernet frame I/O. */
+    if (wasi_type == __WASI_FILETYPE_UNKNOWN) {
+        max_base = RIGHTS_ALL;
+        max_inheriting = RIGHTS_ALL;
+    }
+
+    /* fd_table_insert_fd closes sock on failure. */
+    error = fd_table_insert_fd(exec_env, curfds, sock, wasi_type, max_base,
+                               max_inheriting, sockfd);
+    if (error != __WASI_ESUCCESS) {
+        return error;
+    }
+
+    return __WASI_ESUCCESS;
+}
+
+__wasi_errno_t
 wasi_ssp_sock_set_recv_buf_size(wasm_exec_env_t exec_env,
                                 struct fd_table *curfds, __wasi_fd_t fd,
                                 __wasi_size_t size)
@@ -3421,6 +3464,35 @@ wasi_ssp_sock_restore_open(wasm_exec_env_t exec_env, struct fd_table *curfds,
         return __WASI_EPROTONOSUPPORT;
 
     if (os_socket_create_ext(&sock, is_ipv4, os_socktype, protocol) != BHT_OK)
+        return convert_errno(errno);
+    if (!fd_table_insert_existing(curfds, target_fd, sock, false)) {
+        os_socket_close(sock);
+        return __WASI_EMFILE;
+    }
+    return __WASI_ESUCCESS;
+}
+
+__wasi_errno_t
+wasi_ssp_sock_restore_open_packet(wasm_exec_env_t exec_env,
+                                  struct fd_table *curfds,
+                                  __wasi_fd_t target_fd, const char *ifname,
+                                  int protocol, int flags)
+{
+    bh_socket_t sock;
+    struct fd_object *stale = NULL;
+
+    if (!ifname || ifname[0] == '\0')
+        return __WASI_EINVAL;
+
+    /* Release any stale descriptor occupying target_fd (same as restore_open). */
+    rwlock_wrlock(&curfds->lock);
+    if (target_fd < curfds->size && curfds->entries[target_fd].object != NULL)
+        fd_table_detach(curfds, target_fd, &stale);
+    rwlock_unlock(&curfds->lock);
+    if (stale != NULL)
+        fd_object_release(exec_env, stale);
+
+    if (os_socket_create_packet(&sock, ifname, protocol, flags) != BHT_OK)
         return convert_errno(errno);
     if (!fd_table_insert_existing(curfds, target_fd, sock, false)) {
         os_socket_close(sock);

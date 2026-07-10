@@ -116,6 +116,18 @@ os_socket_create_ext(bh_socket_t *sock, bool is_ipv4, int socktype,
 }
 
 int
+os_socket_create_packet(bh_socket_t *sock, const char *ifname, int protocol,
+                        int flags)
+{
+    (void)sock;
+    (void)ifname;
+    (void)protocol;
+    (void)flags;
+    errno = ENOTSUP;
+    return BHT_ERROR;
+}
+
+int
 os_socket_bind(bh_socket_t socket, const char *host, int *port)
 {
     CHECK_VALID_SOCKET_HANDLE(socket);

@@ -744,6 +744,22 @@ os_socket_create_ext(bh_socket_t *sock, bool is_ipv4, int socktype,
 }
 
 int
+os_socket_create_packet(bh_socket_t *sock, const char *ifname, int protocol,
+                        int flags)
+{
+    (void)sock;
+    (void)ifname;
+    (void)protocol;
+    (void)flags;
+#ifdef ENOTSUP
+    errno = ENOTSUP;
+#else
+    errno = EOPNOTSUPP;
+#endif
+    return BHT_ERROR;
+}
+
+int
 os_socket_inet_network(bool is_ipv4, const char *cp, bh_ip_addr_buffer_t *out)
 {
     if (!cp)
