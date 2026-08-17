@@ -177,6 +177,28 @@ recvfrom(int sockfd, void *buf, size_t len, int flags,
 int
 socket(int domain, int type, int protocol);
 
+static inline __wasi_errno_t
+__wasi_sock_open_tap(const char *ifname, int flags, __wasi_fd_t *tapfd);
+
+/**
+ * Open a Linux TAP interface using IFF_TAP | IFF_NO_PI.
+ * On success returns a WASI fd usable with read/write/close.
+ */
+static inline int
+sock_open_tap(const char *ifname, int flags)
+{
+    __wasi_fd_t tapfd;
+    __wasi_errno_t error;
+
+    error = __wasi_sock_open_tap(ifname, flags, &tapfd);
+    if (error != __WASI_ERRNO_SUCCESS) {
+        errno = error;
+        return -1;
+    }
+
+    return (int)tapfd;
+}
+
 int
 getsockname(int sockfd, struct sockaddr *addr, socklen_t *addrlen);
 
@@ -223,6 +245,19 @@ __wasi_sock_accept(__wasi_fd_t fd, __wasi_fdflags_t flags, __wasi_fd_t *fd_new)
         (int32_t)fd, (int32_t)flags, (int32_t)fd_new);
 }
 #endif
+
+int32_t
+__imported_wasi_snapshot_preview1_sock_open_tap(int32_t arg0, int32_t arg1,
+                                                int32_t arg2)
+    __attribute__((__import_module__("wasi_snapshot_preview1"),
+                   __import_name__("sock_open_tap")));
+
+static inline __wasi_errno_t
+__wasi_sock_open_tap(const char *ifname, int flags, __wasi_fd_t *tapfd)
+{
+    return (__wasi_errno_t)__imported_wasi_snapshot_preview1_sock_open_tap(
+        (int32_t)ifname, (int32_t)flags, (int32_t)tapfd);
+}
 
 /**
  * Returns the local address to which the socket is bound.

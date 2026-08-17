@@ -2702,6 +2702,38 @@ wasi_ssp_sock_open(wasm_exec_env_t exec_env, struct fd_table *curfds,
 }
 
 __wasi_errno_t
+wasi_ssp_sock_open_tap(wasm_exec_env_t exec_env, struct fd_table *curfds,
+                       const char *ifname, int flags, __wasi_fd_t *tapfd)
+{
+    bh_socket_t tap;
+    __wasi_filetype_t wasi_type = __WASI_FILETYPE_UNKNOWN;
+    __wasi_rights_t max_base = 0, max_inheriting = 0;
+    __wasi_errno_t error;
+
+    if (!ifname || ifname[0] == '\0' || flags != 0)
+        return __WASI_EINVAL;
+
+    if (os_socket_create_tap(&tap, ifname, flags) != BHT_OK)
+        return convert_errno(errno);
+
+    error = fd_determine_type_rights(tap, &wasi_type, &max_base,
+                                     &max_inheriting);
+    if (error != __WASI_ESUCCESS) {
+        os_socket_close(tap);
+        return error;
+    }
+
+    error = fd_table_insert_fd(exec_env, curfds, tap, wasi_type, max_base,
+                               max_inheriting, tapfd);
+    if (error != __WASI_ESUCCESS) {
+        os_socket_close(tap);
+        return error;
+    }
+
+    return __WASI_ESUCCESS;
+}
+
+__wasi_errno_t
 wasi_ssp_sock_set_recv_buf_size(wasm_exec_env_t exec_env,
                                 struct fd_table *curfds, __wasi_fd_t fd,
                                 __wasi_size_t size)
@@ -3387,4 +3419,3 @@ wasi_ssp_sock_restore_open(wasm_exec_env_t exec_env, struct fd_table *curfds,
     }
     return __WASI_ESUCCESS;
 }
-

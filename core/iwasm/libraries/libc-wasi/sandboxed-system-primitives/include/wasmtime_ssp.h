@@ -274,6 +274,11 @@ wasi_ssp_sock_open(wasm_exec_env_t exec_env, struct fd_table *curfds,
                    __wasi_fd_t *sockfd) WARN_UNUSED;
 
 __wasi_errno_t
+wasi_ssp_sock_open_tap(wasm_exec_env_t exec_env, struct fd_table *curfds,
+                       const char *ifname, int flags,
+                       __wasi_fd_t *tapfd) WARN_UNUSED;
+
+__wasi_errno_t
 wasi_ssp_sock_restore_open(wasm_exec_env_t exec_env, struct fd_table *curfds,
                            __wasi_fd_t target_fd, int af, int socktype) WARN_UNUSED;
 

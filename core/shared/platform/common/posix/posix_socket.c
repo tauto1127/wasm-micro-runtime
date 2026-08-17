@@ -12,6 +12,14 @@
 #include <netinet/tcp.h>
 #include <netinet/in.h>
 
+#ifdef __linux__
+#include <fcntl.h>
+#include <linux/if_tun.h>
+#include <net/if.h>
+#include <sys/ioctl.h>
+#include <unistd.h>
+#endif
+
 static bool
 textual_addr_to_sockaddr(const char *textual, int port, struct sockaddr *out,
                          socklen_t *out_len)
@@ -132,6 +140,49 @@ os_socket_create(bh_socket_t *sock, bool is_ipv4, bool is_tcp)
     }
 
     return (*sock == -1) ? BHT_ERROR : BHT_OK;
+}
+
+int
+os_socket_create_tap(bh_socket_t *tap, const char *ifname, int flags)
+{
+#ifdef __linux__
+    struct ifreq ifr;
+    int fd;
+
+    if (!tap || !ifname || ifname[0] == '\0' || flags != 0) {
+        errno = EINVAL;
+        return BHT_ERROR;
+    }
+
+    if (strnlen(ifname, IFNAMSIZ) >= IFNAMSIZ) {
+        errno = ENAMETOOLONG;
+        return BHT_ERROR;
+    }
+
+    fd = open("/dev/net/tun", O_RDWR | O_CLOEXEC);
+    if (fd < 0)
+        return BHT_ERROR;
+
+    memset(&ifr, 0, sizeof(ifr));
+    ifr.ifr_flags = IFF_TAP | IFF_NO_PI;
+    strncpy(ifr.ifr_name, ifname, IFNAMSIZ - 1);
+
+    if (ioctl(fd, TUNSETIFF, &ifr) < 0) {
+        int saved = errno;
+        close(fd);
+        errno = saved;
+        return BHT_ERROR;
+    }
+
+    *tap = fd;
+    return BHT_OK;
+#else
+    (void)tap;
+    (void)ifname;
+    (void)flags;
+    errno = ENOTSUP;
+    return BHT_ERROR;
+#endif
 }
 
 int

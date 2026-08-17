@@ -439,6 +439,18 @@ int
 os_socket_create(bh_socket_t *sock, bool is_ipv4, bool is_tcp);
 
 /**
+ * Create or attach to a Linux TAP interface.
+ *
+ * @param tap [OUTPUT] the TAP file handle
+ * @param ifname requested interface name
+ * @param flags reserved; must be zero
+ *
+ * @return 0 if success, -1 otherwise
+ */
+int
+os_socket_create_tap(bh_socket_t *tap, const char *ifname, int flags);
+
+/**
  * Assign the address and port to the socket
  *
  * @param socket the socket to bind
