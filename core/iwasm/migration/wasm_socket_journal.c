@@ -249,6 +249,16 @@ socket_journal_restore(wasm_exec_env_t exec_env, const char *file_prefix)
             }
             case SOCK_OP_ADD_MEMBERSHIP: {
                 err = wasmtime_ssp_sock_set_ip_add_membership(exec_env, curfds, op->fd, (__wasi_addr_ip_t *)&op->multiaddr, op->interface);
+                /* The recorded interface is an IP address from the source
+                 * host. On migration it may no longer exist; retry with
+                 * INADDR_ANY so the destination host selects its default
+                 * interface. */
+                if (err != __WASI_ESUCCESS && op->interface != 0) {
+                    err = wasmtime_ssp_sock_set_ip_add_membership(exec_env, curfds, op->fd, (__wasi_addr_ip_t *)&op->multiaddr, 0);
+                    if (err == __WASI_ESUCCESS) {
+                        fprintf(stderr, "Restore: add_membership for fd %d used destination default interface\n", op->fd);
+                    }
+                }
                 if (err != __WASI_ESUCCESS) {
                     fprintf(stderr, "Restore: failed to restore add_membership for fd %d, err %d\n", op->fd, err);
                 }
