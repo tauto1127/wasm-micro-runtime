@@ -2182,9 +2182,14 @@ wasi_sock_recv_from(wasm_exec_env_t exec_env, wasi_fd_t sock,
     memset(buf_begin, 0, total_size);
 
     *ro_data_len = 0;
+    os_printf("[DEBUG-CR-RX-20260924] WAMR sock_recv_from enter wasi_fd=%u iovecs=%u capacity=%u flags=%u\n",
+              (unsigned)sock, (unsigned)ri_data_len, (unsigned)total_size,
+              (unsigned)ri_flags);
     err = wasmtime_ssp_sock_recv_from(exec_env, curfds, sock, buf_begin,
                                       total_size, ri_flags, src_addr,
                                       &recv_bytes);
+    os_printf("[DEBUG-CR-RX-20260924] WAMR sock_recv_from return wasi_fd=%u wasi_errno=%u bytes=%u\n",
+              (unsigned)sock, (unsigned)err, (unsigned)recv_bytes);
     if (err != __WASI_ESUCCESS) {
         goto fail;
     }
