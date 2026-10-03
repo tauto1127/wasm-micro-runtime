@@ -237,6 +237,11 @@ wasm_cluster_thread_continue_all(WASMCluster *cluster);
 void
 wasm_cluster_thread_waiting_run(WASMExecEnv *exec_env);
 
+/* Resume a restored waiter only after it has parked. The STOP check and
+   wakeup are serialized with waiting_run by exec_env->wait_lock. */
+bool
+wasm_cluster_thread_continue_if_stopped(WASMExecEnv *exec_env);
+
 struct AtomicCounter *
 wasm_cluster_init_checkpointing_counter(WASMCluster *cluster, int count);
 

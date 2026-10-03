@@ -1014,6 +1014,24 @@ wasm_cluster_thread_continue(WASMExecEnv *exec_env)
     os_mutex_unlock(&exec_env->wait_lock);
 }
 
+bool
+wasm_cluster_thread_continue_if_stopped(WASMExecEnv *exec_env)
+{
+    bool continued = false;
+
+    /* waiting_run sets STOP while holding this same lock. Acquiring it
+       after that transition guarantees its cond-wait can receive the wake. */
+    os_mutex_lock(&exec_env->wait_lock);
+    if (exec_env->current_status->running_status == STATUS_STOP) {
+        wasm_cluster_clear_thread_signal(exec_env);
+        exec_env->current_status->running_status = STATUS_RUNNING;
+        os_cond_signal(&exec_env->wait_cond);
+        continued = true;
+    }
+    os_mutex_unlock(&exec_env->wait_lock);
+    return continued;
+}
+
 void
 wasm_cluster_thread_step(WASMExecEnv *exec_env)
 {

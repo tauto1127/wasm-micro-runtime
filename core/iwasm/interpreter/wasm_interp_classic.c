@@ -1454,7 +1454,12 @@ restore_sync_routine(void *arg)
             continue;
         }
 
-        wasm_cluster_thread_continue(target_env);
+        /* The restore barrier means state is loaded, not that this child
+           has entered waiting_run yet. An early unconditional continue can
+           be overwritten by waiting_run's STOP and lose the wakeup. */
+        while (!wasm_cluster_thread_continue_if_stopped(target_env)) {
+            usleep(10);
+        }
 
         /* wait until this thread has actually re-entered atomic.wait */
         confirmed_waiters++;
